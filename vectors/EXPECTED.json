@@ -1,0 +1,259 @@
+{
+  "01-verified.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "verified",
+    "manifest": "ok",
+    "records": 3,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "02-no-manifest.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "partial",
+    "manifest": "missing",
+    "records": 3,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "03-record-edited.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "failed",
+    "manifest": "missing",
+    "records": 3,
+    "keys": 1,
+    "firstFailure": {
+      "index": 1,
+      "reason": "tampered"
+    },
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "04-manifest-edited.html": {
+    "holding": null,
+    "outside": 0,
+    "state": "failed",
+    "manifest": "records",
+    "records": 0,
+    "keys": 0,
+    "firstFailure": {
+      "index": -1,
+      "reason": "manifest"
+    },
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "05-withheld-record.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 4,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "verified",
+    "manifest": "ok",
+    "records": 4,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 1,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "06-carried-key.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "partial",
+    "manifest": "ok",
+    "records": 3,
+    "keys": 2,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 2,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "07-prior-key-missing.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "partial",
+    "manifest": "ok",
+    "records": 3,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 2,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "08-self-minted-token.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "partial",
+    "manifest": "ok",
+    "records": 3,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [
+      null
+    ],
+    "anchorsOk": [
+      true
+    ],
+    "keyDatedBy": null
+  },
+  "09-key-dated.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 3,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "state": "verified",
+    "manifest": "ok",
+    "records": 3,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": [
+      "FreeTSA (freetsa.org) Root CA"
+    ]
+  },
+  "10-report-selection.html": {
+    "holding": {
+      "kind": "report",
+      "included": 2,
+      "totalSource": 3,
+      "leftOut": 1
+    },
+    "outside": 1,
+    "state": "verified",
+    "manifest": "ok",
+    "records": 2,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  }
+}
