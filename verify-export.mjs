@@ -30,6 +30,13 @@ import { pathToFileURL } from 'node:url';
 const crypto = globalThis.crypto ?? webcrypto;
 
 const PAYLOAD_OPEN = '<script type="application/json" id="fw-export-data">';
+/** Any script element carrying the payload id, however its attributes are ordered. */
+const PAYLOAD_RE = /<script\b[^>]*\bid="fw-export-data"[^>]*>/;
+/** The opening tag and where it ends, or null. */
+function payloadOpen(text) {
+  const m = PAYLOAD_RE.exec(text);
+  return m ? { at: m.index, end: m.index + m[0].length } : null;
+}
 
 /** The rows a reader reads, as a browser's textContent would give them. Byte-synced with extractProvenanceRows in html-export.ts. */
 function provenanceDocument(html) {
@@ -39,14 +46,64 @@ function provenanceDocument(html) {
   // and readProvenanceRows in verifier-core-source.ts are the other two); all
   // three must name the same tags, or a file the browser reads as ok reads as
   // broken here. Matching <dd> alone did exactly that, found 2026-09-08.
-  const re = /<(?:dd|p) data-fw-prov="([a-zA-Z]+)">([\s\S]*?)<\/(?:dd|p)>/g;
+  //
+  // The opener is matched on its own and the close is looked for inside a
+  // bounded window, rather than by one regex with a lazy body over the whole
+  // file. That regex was /<(?:dd|p) data-fw-prov="([a-zA-Z]+)">([\s\S]*?)<\/(?:dd|p)>/g
+  // until 2026-09-18, and an opener with no close made its body scan to the end
+  // of the file, so a file with N unclosed openers cost N times its own length.
+  // Measured on the same regex: 2,000 openers in 247KB took 216ms, 4,000 in
+  // 494KB took 712ms, 8,000 in 988KB took 2.8s, 16,000 in 2MB took 12.6s, four
+  // times the work each time the file doubled. The file is whatever somebody
+  // hands you, and this runs before the key is imported and before the manifest
+  // is checked, so it was a way to hang the tab of a person checking a hostile
+  // file, and to hang feelingwise.org/check, where anyone can drop one.
+  //
+  // The limit counts openers LOOKED AT, not rows kept, which is the half that
+  // does the work: without it, a file that is nothing but openers still costs
+  // one bounded read each, and 760,000 of them in a 16MB file is 6GB of reading
+  // even though the reads are bounded. Counting attempts caps the whole scan at
+  // ROW_LIMIT times BODY_LIMIT, about 8MB, whatever the file's size.
+  //
+  // Both limits are sized against a real export. The demo carried 7 rows and a
+  // longest body of 502 characters when they were set; the rows the builder
+  // attributes were widened on 2026-09-18 and the vectors now measure 16 rows
+  // with a longest body of 429 on a single-key file, and 15 rows with a longest
+  // body of 995 on a two-key one, the long one being the per-key table. Still 60
+  // times the rows and 8 times the longest body. A file past either limit is not
+  // an export, and the manifest check fails it on the row digest, which is the
+  // right verdict for a mangled file.
+  //
+  // The attribute is matched wherever it sits in the tag. Anchoring it to the
+  // position right after the tag name, which is what this did until 2026-09-18,
+  // read nothing on the two widened rows that carry a class as well, and a
+  // browser's querySelectorAll does not care about attribute order: the page
+  // read 16 rows where this read 14, and every freshly built vector came out
+  // reading BROKEN on summary-rows. Three implementations of one rule is the
+  // standing hazard here, and the one that was strictest lost.
+  const OPEN = /<(dt|dd|p)\b[^>]*?\sdata-fw-prov="([a-zA-Z.]+)"[^>]*>/g;
+  const BODY_LIMIT = 8192;
+  const ROW_LIMIT = 1000;
+  let looked = 0;
   let m;
-  while ((m = re.exec(html)) !== null) {
-    const name = m[1];
-    const text = m[2]
+  while (looked++ < ROW_LIMIT && (m = OPEN.exec(html)) !== null) {
+    const from = OPEN.lastIndex;
+    const window = html.slice(from, from + BODY_LIMIT);
+    // The opener's OWN close, not whichever close comes first. Taking the
+    // earliest of </dd> and </p> was harmless while only those two carried the
+    // attribute, and wrong the moment <dt> did: a marked label is immediately
+    // followed by the value it introduces, so the nearest close after the label
+    // is the VALUE's, and this would have signed the label as though it were
+    // the value. Found on 2026-09-18, building the labels into the digest.
+    const close = '</' + m[1] + '>';
+    const end = window.indexOf(close);
+    if (end < 0) continue;
+    const name = m[2];
+    const text = window.slice(0, end)
       .replace(/<[^>]*>/g, '')
       .replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
     nodes.push({ getAttribute() { return name; }, textContent: text });
+    OPEN.lastIndex = from + end + close.length;
   }
   // fwNoHtml says the difference between "the page has no provenance rows"
   // and "there is no page": a bare JSON envelope is the second, and the
@@ -67,9 +124,9 @@ function envelopeOf(json) {
 function parseExport(text) {
   const trimmed = text.trimStart();
   if (trimmed.startsWith('{')) return { data: envelopeOf(trimmed), html: '' };
-  const start = text.indexOf(PAYLOAD_OPEN);
-  if (start < 0) throw new Error('not a FeelingWise export: no fw-export-data payload');
-  const from = start + PAYLOAD_OPEN.length;
+  const open = payloadOpen(text);
+  if (!open) throw new Error('not a FeelingWise export: no fw-export-data payload');
+  const from = open.end;
   const end = text.indexOf('</script>', from);
   if (end < 0) throw new Error('not a FeelingWise export: payload never closes');
   return { data: envelopeOf(text.slice(from, end)), html: text };
@@ -78,6 +135,8 @@ function parseExport(text) {
 function createVerifier(document) {
   // ---- CORE (verbatim from src/forensics/verifier-core-source.ts) ----
 
+  var PAYLOAD_KEYS=["id","timestamp","platform","originalText","originalHash","originalLength","neutralizedText","author","postUrl","techniques","overallScore","userAgeCategory","aiSource","feedSource","aiModel","aiProvider","detectionMode","configSnapshot","prevRecordHash","chainPosition","verdict","skipReason","kind","parentVideoId","environment","priorChainHash","resetReason","publicKeyFingerprint","topic","sourceCategory","parentRecordId","commentDepth","roomAuthor","roomCaption","roomUrl","harmFloor","failureKind","cap","metrics","anchorUrl","overrideOrigin","visualApplied","videoContext","accountType","sourceContainer","observedSequence","viewportSeenAt","surfaceSessionId","imageContext","surfaceOrigin","textCapture","mediaUrls","decision","reader","buildId","verdictOrigin","authorCapture"];
+  var OUTSIDE_PAYLOAD_KEYS=["integrityHash","signature","chainAnchor","redacted"];
   function hex(buf){return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');}
   async function sha256(s){return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));}
   function b64uToBytes(s){
@@ -120,7 +179,9 @@ function createVerifier(document) {
       mediaUrls:r.mediaUrls,
       decision:r.decision,
       reader:r.reader,
-      buildId:r.buildId
+      buildId:r.buildId,
+      verdictOrigin:r.verdictOrigin,
+      authorCapture:r.authorCapture
     });
   }
   async function importPubKey(jwk){
@@ -168,19 +229,70 @@ function createVerifier(document) {
       // checked at all: a redacted record earned its tick from a marker naming
       // its id and a string comparison. Checking it costs one verify and turns
       // "a marker mentions this" into "the install signed this hash".
-      if(rec.signature&&currentFingerprint){
-        var rkeys=keys&&typeof keys.type==='string'?{}:(keys||{});
-        var rkey=rkeys[rec.publicKeyFingerprint||currentFingerprint]||rkeys[currentFingerprint];
-        if(rkey){
-          var rok=false;
-          try{ rok=await crypto.subtle.verify({name:'ECDSA',hash:{name:'SHA-256'}},rkey,b64uToBytes(rec.signature),new TextEncoder().encode(rec.integrityHash)); }catch(e){ rok=false; }
-          if(!rok) return {ok:false,reason:'tampered'};
-        }
+      // A withheld record carrying no signature at all is accepted on the
+      // marker alone, and is NOT counted unsigned the way an ordinary record
+      // is. A read on 2026-09-19 called that a hole, because deleting one field
+      // moves a file from "partial, one record unauthenticated" to VERIFIED.
+      // It is not one: the marker is itself a signed record whose hashed text
+      // names THIS record's id and THIS record's stored integrityHash, checked
+      // equal three lines above, and a forged marker fails the whole file. So
+      // the install has vouched for the hash either way, and the record's own
+      // signature over it adds nothing an attacker could remove. The same
+      // argument covers a file whose key never set up: the marker cannot be
+      // checked either, so the marker's own record already reads unverified and
+      // the file is partial before this branch is reached. What WAS wrong on
+      // 2026-09-19 is the sentence the reader gets: see the note in
+      // scripts/build-standalone-verifier.ts, which said the signature had been
+      // checked over a record that had none. noSignature is what it counts.
+      if(!rec.signature) return {ok:true,redacted:true,markerId:red.markerId,noSignature:true};
+      if(!currentFingerprint) return {ok:true,redacted:true,markerId:red.markerId,noKey:true};
+      // The key is chosen exactly as the ordinary path below chooses it: the
+      // one the record NAMES, and the file's own only when the record names
+      // none. There used to be a second fallback here, "or else the file's
+      // current key", and it could only fire in one case: a record that
+      // names a fingerprint the file does not carry. That is a record from
+      // an older generation of the install, whose signature was made by the
+      // key that has since rotated, so checking it under the CURRENT key
+      // cannot succeed and the record came back 'tampered', a BROKEN file.
+      // The ordinary path calls that same record 'prior-key', unverified and
+      // not a failure; one condition read two opposite ways by two branches
+      // of one function. Measured 2026-09-18 on vector 05 with the withheld
+      // record re-signed by a key the file does not carry: BROKEN at record
+      // 2 (v-1): tampered, exit 2.
+      var byRfp=keys&&typeof keys.type==='string'?{}:(keys||{});
+      if(keys&&typeof keys.type==='string') byRfp[currentFingerprint]=keys;
+      var rfp=rec.publicKeyFingerprint||currentFingerprint;
+      var rkey=byRfp[rfp];
+      if(!rkey){
+        return {ok:true,redacted:true,markerId:red.markerId,unverified:true,priorKey:true,reason:'prior-key',fingerprint:rfp};
       }
+      var rok=false;
+      try{ rok=await crypto.subtle.verify({name:'ECDSA',hash:{name:'SHA-256'}},rkey,b64uToBytes(rec.signature),new TextEncoder().encode(rec.integrityHash)); }catch(e){ rok=false; }
+      if(!rok) return {ok:false,reason:'tampered'};
       return {ok:true,redacted:true,markerId:red.markerId};
     }
     var recomputed=await sha256(canonicalPayload(rec));
-    if(recomputed!==rec.integrityHash) return {ok:false,reason:'tampered'};
+    if(recomputed!==rec.integrityHash){
+      /* The verdict never softens: a record whose content does not hash to its
+         stored hash has failed, and an attacker must not be able to downgrade
+         that by adding a key. What is added is the OTHER explanation, as data:
+         a record written by a newer FeelingWise carries fields this checker's
+         key list does not know, and a key list cannot hash a key it has never
+         heard of, so the recomputation misses for a file that is perfectly
+         sound. Naming the fields lets the reader tell the two apart and go and
+         fetch a current checker instead of concluding the file was edited. */
+      var unknown=[];
+      try{
+        for(var k in rec){
+          if(!Object.prototype.hasOwnProperty.call(rec,k))continue;
+          if(PAYLOAD_KEYS.indexOf(k)!==-1||OUTSIDE_PAYLOAD_KEYS.indexOf(k)!==-1)continue;
+          unknown.push(k);
+        }
+      }catch(e){ unknown=[]; }
+      return unknown.length
+        ? {ok:false,reason:'tampered',unknownFields:unknown.sort()}
+        : {ok:false,reason:'tampered'};
+    }
     // A recomputed unkeyed hash is structural evidence, not authentication.
     // Keep unsigned/unknown-key records readable, but never let them make the
     // overall result green.
@@ -434,7 +546,7 @@ function createVerifier(document) {
   function chainNotes(chain,i18n,sel){
     var notes=[];
     var seams=(chain.branches||0)+(chain.restarts||0);
-    if(seams>0) notes.push(i18n.chainNoteBranches.replace('{n}',String(seams)));
+    if(seams>0) notes.push(i18n.chainNoteSeams.replace('{n}',String(seams)));
     if(chain.unattributed>0) notes.push(i18n.chainNoteUnattributed.replace('{n}',String(chain.unattributed)));
     if(chain.outside>0){
       if(sel&&chain.outside<=sel.leftOut&&i18n.chainNoteOutsideStated){
@@ -453,14 +565,70 @@ function createVerifier(document) {
   // html-export.ts builds the identical string.
   function manifestCanonical(m){return JSON.stringify([m.version,m.recordCount,m.recordsDigest,m.anchorsDigest,m.publicKeysDigest,m.techLabelsDigest,m.i18nDigest,m.publicKeyFingerprint,m.generatedAt,m.envelopeDigest,m.provenanceDigest]);}
   function nz(v){return v===undefined||v===null?null:v;}
+  // Every row of the page that carries data-fw-prov, as [name,text] pairs
+  // sorted by name. The set is whatever the FILE marks, never a list written
+  // here, and that is what lets the builder widen what it marks without
+  // breaking a file already in somebody's hands: a file exported before the
+  // widening carries its own rows and this recomputes exactly those.
+  //
+  // dt joined dd and p on 2026-09-18, when the labels came under the digest. A
+  // browser gives this one for free; the node checker has no DOM and reads the
+  // HTML with a pattern, and the three implementations of this one rule are the
+  // standing hazard here, checked against each other in
+  // tests/unit/forensics/provenance-rule-agrees.test.ts.
   function readProvenanceRows(){
-    var nodes=document.querySelectorAll('dd[data-fw-prov],p[data-fw-prov]');
+    var nodes=document.querySelectorAll('dt[data-fw-prov],dd[data-fw-prov],p[data-fw-prov]');
     var out=[];
     for(var i=0;i<nodes.length;i++){
       out.push([nodes[i].getAttribute('data-fw-prov'),(nodes[i].textContent||'').replace(/\s+/g,' ').trim()]);
     }
     out.sort(function(a,b){return a[0]<b[0]?-1:a[0]>b[0]?1:0;});
     return out;
+  }
+  // The names of the rows this file marks, for the report. The set is a fact
+  // about the FILE, not about the checker: an older file marks fewer, and a
+  // recipient is entitled to know which of the page's statements the signature
+  // covered rather than being told only that it matched. landing/check.html
+  // promised this sentence before anything produced it (2026-09-18).
+  function provenanceRowNames(){
+    var out=[];
+    var nodes=readProvenanceRows();
+    for(var i=0;i<nodes.length;i++) out.push(nodes[i][0]);
+    return out;
+  }
+  function provRow(rows,name){
+    for(var i=0;i<rows.length;i++) if(rows[i][0]===name) return rows[i][1];
+    return null;
+  }
+  // The envelope's profile block against the page rows that were rendered from
+  // it. profile is the one envelope key no digest covers: envelopeCanonical was
+  // fixed before it existed and cannot take it now without refusing every file
+  // signed under the old order. So the copy that IS signed decides. The rendered
+  // "made by" and "machine" rows are under provenanceDigest, checked one line
+  // above this, and a profile that disagrees with them is a maker's name that
+  // was put into the file after the key signed it.
+  //
+  // Measured on 2026-09-18: a profile block invented wholesale in a file whose
+  // page names no maker read VERIFIED, manifest ok, exit 0.
+  //
+  // The name is compared exactly, as the opening of the row (the row goes on to
+  // say that the name is one the maker chose). The machine facts are compared as
+  // the comma line the page prints, and only when at least one of them is
+  // stated: with all four absent the page prints a sentence in the file's own
+  // language, which this cannot reconstruct and must not guess at.
+  function profileAgrees(prof,rows){
+    if(!prof||typeof prof!=='object') return true;
+    var made=provRow(rows,'madeBy');
+    var name=typeof prof.name==='string'?prof.name.replace(/\s+/g,' ').trim():'';
+    if(name){ if(made===null||made.indexOf(name)!==0) return false; }
+    else if(made!==null) return false;
+    var machine=provRow(rows,'machine');
+    if(machine===null) return false;
+    var facts=[];
+    var f=[prof.platform,prof.browser,prof.language,prof.timeZone];
+    for(var i=0;i<f.length;i++) if(typeof f[i]==='string'&&f[i]) facts.push(f[i]);
+    if(facts.length>0&&machine!==facts.join(', ')) return false;
+    return true;
   }
   function envelopeCanonical(d){return JSON.stringify([nz(d.selection),nz(d.keyGenesis),nz(d.keyOrigins),nz(d.signingKeyCreatedAt),nz(d.precisionDisclosure),nz(d.fwVersion),nz(d.locale),nz(d.publicKeyJwk)]);}
   async function checkManifest(data,pubKey,fingerprint){
@@ -475,7 +643,7 @@ function createVerifier(document) {
     if(m.publicKeysDigest!==await sha256(JSON.stringify(data.publicKeys||[]))) return 'keys';
     if(m.techLabelsDigest!==await sha256(JSON.stringify(data.techLabels||{}))) return 'labels';
     if(m.i18nDigest!==await sha256(JSON.stringify(data.i18n||{}))) return 'wording';
-    if(m.envelopeDigest!==await sha256(envelopeCanonical(data))) return 'provenance';
+    if(m.envelopeDigest!==await sha256(envelopeCanonical(data))) return 'envelope';
     // The rows a reader reads live in the HTML. A bare JSON envelope has none —
     // and that input form is advertised by this checker's own usage line, by
     // index.html and by FORMAT.md, which says outright that a bare envelope
@@ -485,17 +653,30 @@ function createVerifier(document) {
     // this checker can raise, so the comparison is reported as not made rather
     // than failed. The real browser document never carries this flag, so the
     // in-page verifier is unaffected.
-    if(document&&document.fwNoHtml===true) return 'no-rows';
-    if(m.provenanceDigest!==await sha256(JSON.stringify(readProvenanceRows()))) return 'summary-rows';
+    // The manifest's own digest and its signature are checked BEFORE the bare
+    // envelope is allowed to decline the row comparison (2026-09-19). They used
+    // to sit after the early return, which meant a bare JSON envelope was never
+    // signature-checked at all while the report still called the manifest
+    // checked. Every digest above is computed from the file's own data, so a
+    // file edited and recomputed is self-consistent: the signature is the only
+    // thing binding this manifest to the key that signed it, and skipping it
+    // made "remove some records and recompute" a clean pass on the one input
+    // form this checker's usage line advertises.
     if(m.digest!==await sha256(manifestCanonical(m))) return 'digest';
     var okSig=false;
     try{
       okSig=await crypto.subtle.verify({name:'ECDSA',hash:{name:'SHA-256'}},pubKey,b64uToBytes(m.signature),new TextEncoder().encode(m.digest));
     }catch(_e){okSig=false;}
-    return okSig?'ok':'signature';
+    if(!okSig) return 'signature';
+    if(document&&document.fwNoHtml===true) return 'no-rows';
+    var provRows=readProvenanceRows();
+    if(m.provenanceDigest!==await sha256(JSON.stringify(provRows))) return 'page-rows';
+    // Only once the rows above are known to be the signed ones.
+    if(!profileAgrees(data.profile,provRows)) return 'profile';
+    return 'ok';
   }
   // ---- END CORE ----
-  return { importVerifiedPubKey, redactionIndex, verifyOne, verifyChain, anchorFindings, coverageFromRecords, verificationState, checkManifest, sha256, selectionOf };
+  return { importVerifiedPubKey, redactionIndex, verifyOne, verifyChain, anchorFindings, coverageFromRecords, verificationState, checkManifest, provenanceRowNames, sha256, selectionOf };
 }
 
 // ---- RFC 3161 (compiled from src/forensics/rfc3161.ts by scripts/gen-rfc3161-inline.mjs; defines __FW_RFC3161__) ----
@@ -1242,8 +1423,28 @@ async function checkTimestamps(data, sha256) {
 async function verifyExportText(text) {
   const { data, html } = parseExport(text);
   const v = createVerifier(provenanceDocument(html));
-  const report = { state: 'failed', manifest: 'missing', records: 0, keys: 0, failures: [], unverified: { priorKey: 0, unsigned: 0, signatureUnverified: 0, signatureRejected: 0 }, carriedKey: 0, redacted: 0, chain: null, anchors: null, coverage: null, notes: [] };
+  const report = { state: 'failed', manifest: 'missing', records: 0, keys: 0, failures: [], unverified: { priorKey: 0, unsigned: 0, signatureUnverified: 0, signatureRejected: 0 }, carriedKey: 0, redacted: 0, holding: null, chain: null, anchors: null, coverage: null, notes: [] };
+  // 'holding' is initialised here and not only assigned on the way out, because
+  // FORMAT.md section 8 tells a checker that a terminal failure reports
+  // holding: null, and the two early returns below returned a report with no
+  // holding key at all. vectors/EXPECTED.json said null on both of them, since
+  // the vector generator's projection normalises an absent field to null, so the
+  // published comparison target disagreed with the checker that produced it and
+  // an implementer diffing a raw report against it saw a difference the spec had
+  // told them not to expect (found 2026-09-18 by a claim check of FORMAT.md
+  // against this file).
 
+  let redactedOnPriorKey = 0;
+  // Two more reasons a withheld record's signature was not checked, both of
+  // which the note below counted as checked until 2026-09-19. The first is
+  // live: a withheld record with no signature field at all is accepted on its
+  // marker, which is right, but the reader was told its signature had been
+  // verified. The second cannot be reached through this entry point today,
+  // because a file whose own key fails to set up returns at key-setup above;
+  // it is counted anyway, since counting only the reachable cases is what
+  // produced the first one.
+  let redactedUnsigned = 0;
+  let redactedNoKey = 0;
   let keySetup;
   try {
     keySetup = await v.importVerifiedPubKey(data.publicKeyJwk, data.publicKeyFingerprint);
@@ -1252,6 +1453,12 @@ async function verifyExportText(text) {
     return report;
   }
   report.manifest = await v.checkManifest(data, keySetup.pubKey, keySetup.fingerprint);
+  // WHICH of the page's statements the signature covered, not merely that it
+  // matched. An older file marks fewer rows, so this is a fact about the file in
+  // the reader's hands rather than about the checker, and landing/check.html
+  // promised a reader they could read it here before anything produced it
+  // (found 2026-09-18 by checking that page's claims against the code).
+  report.coveredRows = v.provenanceRowNames();
   // 'no-rows' joins 'missing' and 'legacy' as a manifest that was not fully
   // checked rather than one that failed: a bare JSON envelope carries no page
   // rows to compare, which is a property of the input form, not evidence
@@ -1279,8 +1486,21 @@ async function verifyExportText(text) {
   for (let i = 0; i < perRecord.length; i++) { const p = perRecord[i]; if (p && p.redacted && markerOk[p.markerId] === false) perRecord[i] = { ok: false, reason: 'redaction-unattested' }; }
   for (let i = 0; i < perRecord.length; i++) {
     const p = perRecord[i];
-    if (!p.ok) { report.failures.push({ index: i, id: records[i] && records[i].id || null, reason: p.reason }); continue; }
+    if (!p.ok) {
+      report.failures.push({
+        index: i, id: records[i] && records[i].id || null, reason: p.reason,
+        ...(p.unknownFields && p.unknownFields.length ? { unknownFields: p.unknownFields } : {}),
+      });
+      continue;
+    }
     if (p.redacted) report.redacted++;
+    // Withheld AND on a key this file does not carry: accepted by its marker
+    // alone, with no signature check, because there is no key here to check it
+    // under. Kept apart from report.redacted so the note below can say which of
+    // the two a reader is holding.
+    if (p.redacted && p.priorKey) redactedOnPriorKey++;
+    if (p.redacted && p.noSignature) redactedUnsigned++;
+    if (p.redacted && p.noKey) redactedNoKey++;
     if (p.carriedKey) report.carriedKey++;
     if (p.unverified) {
       if (p.unsigned) report.unverified.unsigned++;
@@ -1327,6 +1547,13 @@ async function verifyExportText(text) {
   report.state = state;
   if (report.manifest === 'missing' || report.manifest === 'legacy') report.notes.push('no signed manifest: the file was made by a build before 2026-09-06, or the install could not sign it');
   if (report.manifest === 'no-rows') report.notes.push('this is a bare JSON envelope: everything in the manifest was checked except the digest over the page rows, which are not present in this form. Ask for the HTML export to check those too.');
+  // Named, not counted. A reader comparing two files, or reading one made before
+  // a widening, is being told which of the page's statements the signature
+  // stands behind. The count alone would answer a question nobody asked.
+  if (report.manifest === 'ok' && (report.coveredRows || []).length) {
+    report.notes.push('the signature covers ' + report.coveredRows.length + ' statements this page makes about the file and its records: '
+      + report.coveredRows.join(', ') + '. Anything else on the page is outside it.');
+  }
   const seams = (report.chain.branches || 0) + (report.chain.restarts || 0);
   if (seams > 0) report.notes.push(seams + ' chain seam(s): the install signed records at positions it had already used, or restarted');
   if (report.chain.unattributed > 0) report.notes.push(report.chain.unattributed + ' seam(s) could not be attributed by signature');
@@ -1339,7 +1566,26 @@ async function verifyExportText(text) {
   // content has left the file, so the hash cannot be recomputed and the record
   // stands on a signed redaction marker plus its own signature over that hash.
   // Counted since the marker shipped and printed nowhere until 2026-09-08.
-  if (report.redacted > 0) report.notes.push(report.redacted + ' record(s) had fields withheld before this file was made: their content is not here, so their hash was not recomputed. Each one is named by a signed redaction marker in this file and its signature over that hash was checked.');
+  if (report.redacted > 0) {
+    const unchecked = redactedOnPriorKey + redactedUnsigned + redactedNoKey;
+    const checked = report.redacted - unchecked;
+    let line = report.redacted + ' record(s) had fields withheld before this file was made: their content is not here, so their hash was not recomputed. Each one is named by a signed redaction marker in this file';
+    // The sentence used to end "and its signature over that hash was checked",
+    // of all of them. For a withheld record on a rotated key there is no key in
+    // this file to check it under, so it was not checked and the reader was
+    // being told it was (2026-09-18). The same sentence was still reaching a
+    // reader over a record with no signature at all, which is accepted on its
+    // marker and was being counted among the checked (2026-09-19); the two are
+    // one defect met twice, a count that named one reason out of three.
+    const why = [];
+    if (redactedUnsigned) why.push(redactedUnsigned + (redactedUnsigned === 1 ? ' carries' : ' carry') + ' no signature at all');
+    if (redactedOnPriorKey) why.push(redactedOnPriorKey + (redactedOnPriorKey === 1 ? ' names' : ' name') + ' a signing key this file does not carry');
+    if (redactedNoKey) why.push(redactedNoKey + ' could not be checked, because this file has no key of its own to check them under');
+    if (unchecked === 0) line += ' and its signature over that hash was checked.';
+    else if (checked === 0) line += ', and none of their signatures were checked: ' + why.join('; ') + ', so the marker is all there is.';
+    else line += '. ' + checked + ' of them had their signature over that hash checked; of the rest, ' + why.join('; ') + ', so for those the marker is all there is.';
+    report.notes.push(line);
+  }
   if (report.holding.anchors === 0 && !keyStamped) report.notes.push('no independent time stamp in this file: no chain anchor from a public authority and no stamp over the signing key; nothing here shows when these records existed beyond what the install wrote');
   if (report.anchors.notInFile > 0) report.notes.push(report.anchors.notInFile + ' independently timestamped record(s) are not in this file');
   if (report.anchors.beyondTail > 0) report.notes.push('an independent timestamp names position ' + report.anchors.beyondPosition + ', past the last record here');
@@ -1418,6 +1664,17 @@ function describe(report) {
     else if (first) lines.push('BROKEN before any record was checked: ' + first.reason + (first.detail ? ' (' + first.detail + ')' : '') + '.');
     else lines.push('BROKEN.');
     if (report.failures.length > 1) lines.push('  ' + report.failures.length + ' record(s) failed in all.');
+    // The other explanation, when the record carries fields this checker has
+    // never heard of: a checker older than the file cannot hash a key that was
+    // appended later, so a sound file fails here. The verdict above does not
+    // move; this is what stops a reader concluding the file was edited when
+    // the truth is that their checker is behind it.
+    const unknown = report.failures.filter((f) => f.unknownFields && f.unknownFields.length);
+    if (unknown.length > 0) {
+      const names = [...new Set(unknown.flatMap((f) => f.unknownFields))].sort();
+      lines.push('  ' + unknown.length + ' of them also carry fields this checker does not know (' + names.join(', ') + ').');
+      lines.push('  A checker older than the file fails exactly this way. Check the version of this checker before reading the result as an edit.');
+    }
   }
   for (const n of report.notes) lines.push('  ' + n);
   describeTimestamps(report.timestamps, lines);

@@ -87,15 +87,27 @@ HTTPS; the extension refuses to send to an `http` address.
 
 ## Test vectors, for a second implementer
 
-`vectors/` holds nine small exports and `EXPECTED.json`, the reading this
+`vectors/` holds twenty small exports and `EXPECTED.json`, the reading this
 checker gives each: valid with its manifest; without the manifest; a record
 edited; the manifest's file edited; a withheld record on its signed marker; an
 earlier generation's key carried; that key missing; a self-minted time-stamp
-token; the signing key dated by FreeTSA. Every record in them is invented and
-the file says so. A program that implements this checker, or a recorder that
-produces this format, can run over these files and compare its readings to
-`EXPECTED.json`. They are built once by `scripts/build-verifier-vectors.ts` in
-the FeelingWise tree and rebuilt only when what a file carries changes.
+token; the signing key dated by FreeTSA; a stated selection; text that is not
+plain ASCII; a forged signature; an unsigned record; a withheld record with no
+marker; a chain seam beside a branch; an edited record that names no key, which
+is read softly and never failed; the file's own key failing its own
+fingerprint; a withheld record pointing at a marker other than the one
+attesting it; a chain seam the file cannot attribute by signature, because
+the record on one side of it was signed by a key the file no longer carries; and a
+withheld record carrying no signature at all, which reads VERIFIED. That last
+one is not the reading an ordinary unsigned record gets, which is partial: the
+marker attesting a withheld record is itself a signed record naming that
+record's id and its stored hash, so the install has vouched for the hash
+whether or not the record repeats the signature, and a forged marker fails the
+whole file. Compare 20 against 05 in EXPECTED.json, not against 13. Every record in them is invented and the file says so. A program
+that implements this checker, or a recorder that produces this format, can run
+over these files and compare its readings to `EXPECTED.json`. They are built
+once by `scripts/build-verifier-vectors.ts` in the FeelingWise tree and
+rebuilt only when what a file carries changes.
 
 ## How it is built
 
