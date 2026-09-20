@@ -78,26 +78,50 @@ inside the hash, names the key that signed the record.
 
 `kind` names what the record is. Ordinary kinds describe content (`post`,
 `comment`, `video`, `image`, `top-comment`, `environment`). Nine marker kinds
-describe the chain's own housekeeping, each a signed record like any other,
-whose `originalText` starts with `[<kind> @ <ISO time>]` followed by
-space-separated `name=value` facts:
+describe the chain's own housekeeping, each a signed record like any other.
+Eight of them have an `originalText` that starts with `[<kind> @ <ISO time>]`
+followed by space-separated `name=value` facts, always in the order given here.
+The ninth, the month rotation, is shaped differently and is given in full. Any
+of the nine may end with the bare word `settings-read-failed`: the marker was
+written while the settings could not be read, and it says so rather than attest
+a setting nobody chose. A reader takes each fact by name and ignores a name it
+does not know, because facts are only ever appended.
 
-- `reset-marker`: the chain was reset; `priorChainHash` names the last record
-  of the chain before.
-- `month-rotation-marker`: the chain rolled into a new month's store;
-  `priorChainHash` links the months.
-- `prune-marker`: records were deleted under a size cap; `deleted=`, `cap=`.
-- `gap-marker`: a record was lost between capture and the chain; `reason=`,
-  `platform=` and the delivery id, so a hole is a stated hole.
-- `heartbeat-marker`: the recorder was alive over a window; `from=`, `to=`, and
-  the count of records skipped by the reader's own list without a name.
-- `import-marker`: records from an earlier export were brought in;
-  `imported=`, `alreadyPresent=`.
-- `repair-marker`: stored positions were repaired; `ran=`, `method=`.
+- `reset-marker`: the chain was reset. The text carries no facts:
+  `[reset-marker @ <ISO time>]`. What it links to is a field of the record, not
+  part of the text: `priorChainHash` names the last record of the chain before.
+- `month-rotation-marker`: the chain rolled into a new month's store. Its text
+  does not use the kind as its tag and keeps its one fact inside the brackets:
+  `[month-rotation @ <ISO time> from=<YYYY-MM>]`, where `from` is the month that
+  was archived. `priorChainHash`, a field of the record and not part of the
+  text, links the months.
+- `prune-marker`: records were deleted under a size cap: `deleted=`, `cap=`,
+  then `positions=<first>..<last>` when the range is known, then `archived=`
+  with the months the deleted records went to, or `archived=none`.
+- `gap-marker`: something was lost between capture and the chain, so a hole is
+  a stated hole: `reason=`, `platform=`, `count=`, `unit=`, `from=`, `to=`,
+  and for a lost chain a breakdown of what went. The delivery id of the row
+  that was given up on is NOT in the text; this document said it was until
+  2026-09-20.
+- `heartbeat-marker`: the recorder was alive over a window: `from=`, `to=`,
+  `feedsOpen=`, `positionsSince=` (a number, or `chain-restarted`),
+  `canary=`, and `excludedSkipped=`, the count of records skipped by the
+  reader's own list. It is a count only: no account is named.
+- `import-marker`: records from an earlier export were brought in:
+  `imported=`, `alreadyPresent=`, `rejected=`, `keys=` (the signing keys of
+  what came in, or `none`), `idsDigest=`.
+- `repair-marker`: stored positions were repaired: `ran=`, `method=`,
+  `repaired=`, `unrepaired=`, `healed=yes|no`, and `error=` when there was one.
 - `redaction-marker`: a record was withheld from exports at the person's
-  request: `record=<id> recordHash=<hex> fields=<comma list>`; section 4.
-- `reconcile-marker`: the record was compared with the platform's own export;
-  `archive=<SHA-256 of that archive>`.
+  request: `record=<id> recordHash=<hex> fields=<comma list>`; section 4. This
+  is the only marker whose text the checker parses.
+- `reconcile-marker`: the record was compared with the platform's own export:
+  `archive=<SHA-256 of that archive>`, `platforms=`, `from=`, `to=`,
+  `windowMinutes=`, `corroboratedByUrl=`, `corroboratedByAuthorAndTime=`,
+  `unmatchedRecords=`, `unmatchedArchiveItems=`, `recordsOutsideWindow=`, and,
+  on markers written since 2026-09-18 and only when present,
+  `systemMarkersExcluded=`, `archiveItemsOutsideCoverage=`, `comparedFrom=`,
+  `comparedTo=`.
 
 A record MAY carry `redacted: { markerId, at, fields }` and lack the fields
 named; section 4.
