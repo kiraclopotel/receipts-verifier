@@ -87,7 +87,7 @@ HTTPS; the extension refuses to send to an `http` address.
 
 ## Test vectors, for a second implementer
 
-`vectors/` holds twenty small exports and `EXPECTED.json`, the reading this
+`vectors/` holds twenty-four small exports and `EXPECTED.json`, the reading this
 checker gives each: valid with its manifest; without the manifest; a record
 edited; the manifest's file edited; a withheld record on its signed marker; an
 earlier generation's key carried; that key missing; a self-minted time-stamp
@@ -103,7 +103,12 @@ one is not the reading an ordinary unsigned record gets, which is partial: the
 marker attesting a withheld record is itself a signed record naming that
 record's id and its stored hash, so the install has vouched for the hash
 whether or not the record repeats the signature, and a forged marker fails the
-whole file. Compare 20 against 05 in EXPECTED.json, not against 13. Every record in them is invented and the file says so. A program
+whole file. Compare 20 against 05 in EXPECTED.json, not against 13. The last four are one family: two months joined by a
+rotation marker whose signed link names the last record of the month before, which reads VERIFIED
+because positions restart at 0 every month on purpose; and the same file three more times, with the
+link naming a record that is not there, naming a record in the middle of the month, and on a marker
+that carries no signature. Each of those three reads partial, because nothing in the file shows
+which run the marker follows. Every record in them is invented and the file says so. A program
 that implements this checker, or a recorder that produces this format, can run
 over these files and compare its readings to `EXPECTED.json`. They are built
 once by `scripts/build-verifier-vectors.ts` in the FeelingWise tree and

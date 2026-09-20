@@ -397,6 +397,27 @@ consecutive is a seam, counted as a restart. A position held twice is a branch
 outside the file (counted). None of these fails a file on its own; a modified
 record fails its own hash and a forged one its own signature.
 
+Positions are compared inside a run, and a run can be linked to the one before
+it. Positions restart at 0 on purpose in two places, the month rotation and the
+reset, and each writes a marker at position 0 whose `prevRecordHash` is the
+constant `feelingwise-chain-genesis-v1` and whose `priorChainHash`, which is
+inside the hashed payload, is the `integrityHash` of the last record of the run
+it follows. A checker MUST start a new run at a `month-rotation-marker` or a
+`reset-marker` at position 0 when three things hold: its `priorChainHash` is the
+`integrityHash` of a record in the file; no record in the file names that record
+in `prevRecordHash`, which is what being the last of a run means inside a file;
+and the marker's own signature verified under a key. Positions after such a
+marker are compared only with each other, and the marker's own `prevRecordHash`
+is not counted as a predecessor outside the file, because the constant names no
+record. When any of the three fails, nothing in the file shows which run the
+marker follows, and a checker MUST count reused positions as branches exactly as
+it would without the marker. `vectors/21-month-rotation-linked.html` reads
+`verified`; `22-month-rotation-unlinked.html` (the record is not in the file),
+`23-month-rotation-names-a-middle-record.html` and
+`24-month-rotation-marker-unsigned.html` each read `partial` with three
+branches. Until 2026-09-20 the reference checker did not read the link, and
+every whole-record file that crossed a month boundary read PARTIALLY VERIFIED.
+
 A seam is also either attributed or not, and the rule is narrower than it
 sounds. It is attributed only when the records on BOTH sides of it came back
 green: each one passed, and neither was marked unverified. Exactly four readings

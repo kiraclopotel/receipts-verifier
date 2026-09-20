@@ -341,14 +341,54 @@ function createVerifier(document) {
     for(var h=0;h<records.length;h++){
       if(typeof records[h].integrityHash==='string') hashes[records[h].integrityHash]=true;
     }
-    var seenPos={},branches=0,restarts=0,unattributed=0,outside=0;
+    // A LINKED RUN. Positions restart at 0 on purpose in two places: the month
+    // rotation and the reset. Each writes a signed marker at position 0 whose
+    // prevRecordHash is the genesis constant (it has no predecessor in its own
+    // run) and whose priorChainHash, inside the hashed payload, names the last
+    // record of the run it follows. Until 2026-09-20 neither was read here, so
+    // every position of the new month counted as "held twice" and the marker
+    // counted as naming a predecessor outside the file: a whole-record export
+    // made by the product's own code across one ordinary month flip, 17
+    // records, read PARTIALLY VERIFIED with "7 chain seams" and "1 record names
+    // a predecessor that is not in this file". That is every install after its
+    // first month. The link is followed instead: when the marker's
+    // priorChainHash resolves to a record in this file, the positions after it
+    // are a new run and are compared only with each other. When it does not
+    // resolve, nothing changes: the run before it is not shown to be the one it
+    // follows, and a reused position is still counted.
+    //
+    // Two conditions keep the rule from being wider than its reason (found the
+    // same day by reading the first draft against FORMAT.md). The record named must be the LAST
+    // of a run, which in a file means no record names it as its predecessor: a
+    // marker pointing into the middle of a month links nothing. And the marker
+    // itself must have verified under a key, because a marker whose signature
+    // was not checked could otherwise erase branch counts by being present.
+    var GENESIS='feelingwise-chain-genesis-v1';
+    var namedAsPrev={};
+    for(var np=0;np<records.length;np++){
+      if(typeof records[np].prevRecordHash==='string') namedAsPrev[records[np].prevRecordHash]=true;
+    }
+    function opensLinkedRun(r,idx){
+      var own=perRecord&&perRecord[idx];
+      return (r.kind==='month-rotation-marker'||r.kind==='reset-marker')
+        && r.chainPosition===0
+        && typeof r.priorChainHash==='string'&&r.priorChainHash!==''
+        && hashes[r.priorChainHash]===true
+        && namedAsPrev[r.priorChainHash]!==true
+        && !!(own&&own.ok&&!own.unverified);
+    }
+    var seenPos={},branches=0,restarts=0,unattributed=0,outside=0,run=0;
     for(var i=0;i<records.length;i++){
       var cur=records[i];
+      if(i>0&&opensLinkedRun(cur,i)) run++;
       if(typeof cur.chainPosition==='number'){
-        var posKey=(cur.publicKeyFingerprint||'')+':'+cur.chainPosition;
+        var posKey=(cur.publicKeyFingerprint||'')+':'+run+':'+cur.chainPosition;
         if(seenPos[posKey]) branches++; else seenPos[posKey]=true;
       }
       if(i===0||typeof cur.prevRecordHash!=='string') continue;
+      // The opener of a linked run names no predecessor: the genesis constant
+      // is not a record, so it is not one that is missing from the file.
+      if(cur.prevRecordHash===GENESIS&&opensLinkedRun(cur,i)) continue;
       if(hashes[cur.prevRecordHash]) continue;
       var prev=records[i-1];
       var contiguous=typeof prev.chainPosition==='number'

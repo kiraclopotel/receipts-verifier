@@ -572,5 +572,117 @@
     "anchorAuthorities": [],
     "anchorsOk": [],
     "keyDatedBy": null
+  },
+  "21-month-rotation-linked.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 6,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 0,
+    "branches": 0,
+    "restarts": 0,
+    "unattributed": 0,
+    "state": "verified",
+    "manifest": "ok",
+    "records": 6,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "22-month-rotation-unlinked.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 6,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 1,
+    "branches": 3,
+    "restarts": 0,
+    "unattributed": 0,
+    "state": "partial",
+    "manifest": "ok",
+    "records": 6,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "23-month-rotation-names-a-middle-record.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 6,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 1,
+    "branches": 3,
+    "restarts": 0,
+    "unattributed": 0,
+    "state": "partial",
+    "manifest": "ok",
+    "records": 6,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 0,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
+  },
+  "24-month-rotation-marker-unsigned.html": {
+    "holding": {
+      "kind": "whole-record",
+      "included": 6,
+      "totalSource": null,
+      "leftOut": 0
+    },
+    "outside": 1,
+    "branches": 3,
+    "restarts": 0,
+    "unattributed": 0,
+    "state": "partial",
+    "manifest": "ok",
+    "records": 6,
+    "keys": 1,
+    "firstFailure": null,
+    "unverified": {
+      "priorKey": 0,
+      "unsigned": 1,
+      "signatureUnverified": 0,
+      "signatureRejected": 0
+    },
+    "carriedKey": 0,
+    "redacted": 0,
+    "anchorAuthorities": [],
+    "anchorsOk": [],
+    "keyDatedBy": null
   }
 }
