@@ -116,6 +116,23 @@ is not an allowance. On a record that carries `decision`, `verdict` is derived f
 collapse and hide are `flagged-hidden`. The checker does not judge any of it (section 7); it shows
 `row` and `action` on the card.
 
+A content record MAY carry `configSnapshot`, the settings in force when the
+verdict was reached: `mode`, `threshold`, `dailyCap`, and optionally
+`enabledFeatures` (the switches that were on), `settingsReadFailed`, and on
+records written before 2.5.0 `videoUnderstanding` and `imageUnderstanding`. It is
+inside the hash. Two of its values need saying, because a reader cannot tell
+them from the numbers alone:
+
+- `threshold` holds one of two things, by the path that wrote the record. A
+  post record holds the mode's confidence cut, a value below 1 (0.45, 0.55 or
+  0.60). A comment record holds a severity floor on the 1 to 10 scale (6). A
+  value below 1 is a confidence cut; 1 or above is a severity floor. Printed
+  as one scale they read as a tenfold difference that does not exist.
+- The confidence on a record written by the adult reader is 0.9 on every
+  record it acts on. It is a fixed value and not a measure of certainty: the
+  rule that reader applies has no confidence term. The export says so in its
+  methodology block. A checker reports it as written and draws nothing from it.
+
 A record MAY carry `reader`: the profile label declared at the keyboard when it
 was written. A declared reader is a household's own label, not proof of who sat
 there; the export says so beside every count grouped by it.
