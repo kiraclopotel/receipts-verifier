@@ -385,7 +385,18 @@ function createVerifier(document) {
         var posKey=(cur.publicKeyFingerprint||'')+':'+run+':'+cur.chainPosition;
         if(seenPos[posKey]) branches++; else seenPos[posKey]=true;
       }
-      if(i===0||typeof cur.prevRecordHash!=='string') continue;
+      if(typeof cur.prevRecordHash!=='string') continue;
+      // The first record in the file names a predecessor too. FORMAT.md section 4
+      // says every prevRecordHash is resolved; until 2026-09-20 this loop skipped
+      // index 0, so a report of 10 records, every one of which named a record the
+      // report had left out, said 9 did. There is no record before it to be
+      // consecutive with, so an absent predecessor of the first record is always
+      // one outside the file, never a seam. A record at position 0 names none
+      // (the empty string or the genesis constant).
+      if(i===0){
+        if(cur.prevRecordHash!==''&&cur.prevRecordHash!==GENESIS&&cur.chainPosition!==0&&!hashes[cur.prevRecordHash]) outside++;
+        continue;
+      }
       // The opener of a linked run names no predecessor: the genesis constant
       // is not a record, so it is not one that is missing from the file.
       if(cur.prevRecordHash===GENESIS&&opensLinkedRun(cur,i)) continue;
@@ -444,6 +455,7 @@ function createVerifier(document) {
     }
     return {
       present:chained.length,
+      runs:runs.length,
       firstPosition:runs[0][0],
       lastPosition:runs[runs.length-1][runs[runs.length-1].length-1],
       missingBefore:missingBefore,

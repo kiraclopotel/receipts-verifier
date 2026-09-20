@@ -394,8 +394,13 @@ Then the chain: every `prevRecordHash` is resolved against every record in the
 file. A predecessor present is a link. A predecessor absent where positions are
 consecutive is a seam, counted as a restart. A position held twice is a branch
 (counted). A predecessor absent where positions are not consecutive is a record
-outside the file (counted). None of these fails a file on its own; a modified
-record fails its own hash and a forged one its own signature.
+outside the file (counted). The first record in the file is no exception: it
+has no record before it to be consecutive with, so when it sits above position 0
+and its predecessor is absent it is one record outside the file, never a seam.
+Until 2026-09-20 the reference checker skipped it, and a report whose ten
+records each named a left-out predecessor said nine did. None of these fails a
+file on its own; a modified record fails its own hash and a forged one its own
+signature.
 
 Positions are compared inside a run, and a run can be linked to the one before
 it. Positions restart at 0 on purpose in two places, the month rotation and the
