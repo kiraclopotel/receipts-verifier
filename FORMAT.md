@@ -653,6 +653,13 @@ recorder generated, that the file holds every record the chain held, that a
 post existed on the platform, or that any judgement a record carries is right.
 Each of those has its own evidence, some of it in the file (the time stamps,
 the reconcile marker, the stated selection), none of it proof.
+
+The largest of those absences, that a post existed on the platform, is the one
+section 9 is about. It cannot be closed inside a single file by any means at all,
+and what section 9 provides is the one thing that makes it approachable across
+many files: a content identity, so that two strangers who recorded the same item
+give it the same name.
+
 ## 8. What a report says, which is part of the format
 
 Added 2026-09-18, after an engineer wrote an independent checker from this
@@ -785,3 +792,132 @@ the literal string is how, until 2026-09-18, a conforming file that wrote `id`
 before `type` was answered with "not a FeelingWise export", which is the worst
 thing this checker can say about a sound file. The same rule, and the same
 reason, as the attribute-position paragraph in section 5.
+
+## 9. Content identity, and why the format has one
+
+Added 2026-09-21. Vectors: `verifier/vectors/CONTENT-IDENTITY.json`.
+
+### What it is for, which matters more than the rule itself
+
+Section 7 says what a VERIFIED file does not claim, and the largest of those
+absences is this: the format cannot show that anything was ever served. A record
+signed over a fabricated post verifies perfectly. The signature is applied after
+the text is in hand, so no amount of cryptography reaches back past it.
+
+The only thing that does reach it is other people. An observation earns weight in
+proportion to how many unrelated observers recorded the same item being served,
+and forging at scale costs a forger in proportion to how many independent
+recorders they would have to control. That is not a property of a file. It is a
+property of a corpus, and it is unavailable unless one served item gets one name
+from two strangers who have never met.
+
+Before this section it did not. Each record carries `originalHash`, a SHA-256 of
+`originalText` exactly as extracted, and two independent extractions of one post
+differ constantly: composed against decomposed accents, a non-breaking space
+where markup had `&nbsp;`, a line ending, a stray zero-width character, the
+layout whitespace one extractor keeps and another drops. Measured against eight
+such differences, one agreed.
+
+### The rule
+
+A content identity is derived, never stored. It is computed from `originalText`,
+which is inside the canonical payload and therefore already covered by the
+record's signature (section 3), so a reader who has verified a record can compute
+this and needs nothing else from us. Nothing in the record changes to carry it,
+no existing signature is affected, and it applies to every record ever written.
+
+Given `originalText`, the NORMAL FORM is produced by applying, in this order:
+
+1. Unicode normalisation to **NFC**.
+2. Every `\r\n` and every lone `\r` becomes `\n`.
+3. These characters are removed: U+200B ZERO WIDTH SPACE, U+FEFF BYTE ORDER
+   MARK, U+00AD SOFT HYPHEN, U+180E MONGOLIAN VOWEL SEPARATOR.
+4. These become a single U+0020 SPACE: U+0009 TAB, U+00A0 NO-BREAK SPACE,
+   U+1680, U+2000 through U+200A, U+202F, U+205F, U+3000.
+5. Runs of two or more U+0020 become one.
+6. Each line is trimmed of leading and trailing spaces; runs of three or more
+   newlines become two; the whole string is trimmed.
+
+The identity is then the literal string `fw-ci-1:` followed by the **lowercase
+hex SHA-256 of the UTF-8 bytes of the normal form**.
+
+The version lives inside the string and not in a neighbouring field on purpose.
+Identities travel: into a spreadsheet column, into somebody else's database.
+A bare digest from this rule and one from a later rule would compare unequal with
+nothing to say the two were computed differently, and a silent false NON-match is
+how a corroboration count quietly becomes wrong.
+
+### What an implementer must NOT add, and the reason is one sentence
+
+**A false merge is worse than a false split.** Two different items collapsing into
+one identity manufactures corroboration that never happened, which is exactly the
+fabrication this whole mechanism exists to resist. Two records of one item failing
+to meet costs a little evidence and lies to nobody.
+
+So the normal form removes only what a text extractor can add or drop by itself,
+and never touches content. In particular a conforming implementation does not
+fold case, does not unify quotation marks or dashes, does not strip punctuation,
+and does not fold emoji to a base form.
+
+It also KEEPS U+200D ZERO WIDTH JOINER and U+200C ZERO WIDTH NON-JOINER, which
+look like the invisible noise removed in step 3 and are not. The joiner is what
+makes one family emoji out of three separate people, and both characters shape
+letters in Arabic, Persian and the Indic scripts. Removing them would merge texts
+that genuinely differ, and would do it hardest in the languages least represented
+in any corpus assembled so far.
+
+### Two things this rule refuses to repair, and both are correct
+
+**A caption the page only partly carried.** A text cut at a "show more" control is
+less text, not the same text worn differently, and the cut point moves with the
+viewport, so two observers of one post hold two different strings and are each
+right. Normalising them into agreement would be a false merge, and a systematic
+one. `ForensicRecord.textCapture` says which case a record is in: `whole` and
+`folded` mean the page carried the item's whole text and the identity may be
+compared; `cut` means it did not; `platform` means the text came from the
+platform's own payload rather than the screen, and may corroborate other
+`platform` captures but not what a person's screen showed. The field is absent on
+records written before 2026-09-05, and **absent is not `whole`**: those records
+answer "unknown" and a corroboration count must say so rather than lean on
+history it cannot vouch for.
+
+**A joiner one extractor dropped.** Reported rather than repaired, for the reason
+above.
+
+### What an identity does not claim
+
+That two records carry one identity means two files contain the same text. It
+does not mean either observer saw it on a platform, it does not date either
+observation, and it is not by itself evidence that anything was served. It is one
+input to a corroboration judgement, and everything in section 7 still holds.
+
+Identical short text from different people produces one identity, by definition of
+content addressing. A corroboration claim resting on a few words, or on a single
+emoji, is weak evidence and an implementation should make the length visible
+rather than pretend otherwise.
+
+### Conforming
+
+`verifier/vectors/CONTENT-IDENTITY.json` holds 25 vectors in 12 groups. Every
+vector sharing a `group` must produce the identity given; any two groups must
+produce different identities, with one exception the file declares, which is that
+`empty` and `whitespace-only` both normalise to the empty string. The groups
+ending `-cut` and `-unjoined` are the half that must NOT merge, and an
+implementation that merges them is wrong in the direction that matters.
+
+The file is generated from the shipped rule by
+`scripts/build-content-identity-vectors.ts`, so it cannot drift from the code by
+being edited or by being forgotten. Regenerate it with `npm run gen:ci-vectors`.
+
+`corroborate.mjs`, beside this document, is a working implementation of this
+section in about eighty lines and is the shortest way to read the rule as code.
+It is checked against the vectors above and against the extension's own copy, so
+the two cannot say different things. What it does with the identities afterwards
+is described in the README, and the part worth copying is what it REFUSES to do:
+two exports signed by one key are one observer, and counting their overlap as
+agreement is the easiest way to produce a number that means nothing.
+
+`observations.mjs` uses the same rule for a different job: it writes out what a
+file says was served, with every model reading left out, and puts the identity
+beside each row. Between them they are the two things section 9 exists for, which
+are comparing one file with another and citing one file on its own.

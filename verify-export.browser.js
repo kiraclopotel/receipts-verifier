@@ -107,6 +107,14 @@ function envelopeOf(json) {
 function parseExport(text) {
   const trimmed = text.trimStart();
   if (trimmed.startsWith('{')) return { data: envelopeOf(trimmed), html: '' };
+  // A bare JSON ARRAY is json that is not an envelope, not a missing HTML
+  // wrapper. Without this it falls through to the HTML path and is answered
+  // "no fw-export-data payload", which sends a reader looking for a wrapper
+  // that was never the problem. Exporting the records array on its own is the
+  // obvious way to arrive here, and receive-export.mjs relays this same
+  // sentence to whoever POSTed the file. Found 2026-09-21 while exercising the
+  // receiver; corroborate.mjs and observations.mjs already answer this way.
+  if (trimmed.startsWith('[')) throw new Error('not a FeelingWise export: the payload is not an object');
   const open = payloadOpen(text);
   if (!open) throw new Error('not a FeelingWise export: no fw-export-data payload');
   const from = open.end;
@@ -1458,7 +1466,7 @@ async function checkTimestamps(data, sha256) {
 async function verifyExportText(text) {
   const { data, html } = parseExport(text);
   const v = createVerifier(provenanceDocument(html));
-  const report = { state: 'failed', manifest: 'missing', records: 0, keys: 0, failures: [], unverified: { priorKey: 0, unsigned: 0, signatureUnverified: 0, signatureRejected: 0 }, carriedKey: 0, redacted: 0, holding: null, chain: null, anchors: null, coverage: null, notes: [] };
+  const report = { state: 'failed', manifest: 'missing', records: 0, keys: 0, failures: [], unverified: { priorKey: 0, unsigned: 0, signatureUnverified: 0, signatureRejected: 0 }, carriedKey: 0, redacted: 0, holding: null, chain: null, anchors: null, coverage: null, notes: [], noteParts: [] };
   // 'holding' is initialised here and not only assigned on the way out, because
   // FORMAT.md section 8 tells a checker that a terminal failure reports
   // holding: null, and the two early returns below returned a report with no
@@ -1580,79 +1588,166 @@ async function verifyExportText(text) {
   let state = v.verificationState(perRecord, report.chain, { anchors: report.anchors, coverage: report.coverage, selection: sel });
   if ((report.manifest === 'missing' || report.manifest === 'legacy' || report.manifest === 'no-rows') && state === 'verified') state = 'partial';
   report.state = state;
-  if (report.manifest === 'missing' || report.manifest === 'legacy') report.notes.push('no signed manifest: the file was made by a build before 2026-09-06, or the install could not sign it');
-  if (report.manifest === 'no-rows') report.notes.push('this is a bare JSON envelope: everything in the manifest was checked except the digest over the page rows, which are not present in this form. Ask for the HTML export to check those too.');
+  pushNote(report, 'noteNoManifest', {}, report.manifest === 'missing' || report.manifest === 'legacy');
+  pushNote(report, 'noteBareEnvelope', {}, report.manifest === 'no-rows');
   // Named, not counted. A reader comparing two files, or reading one made before
   // a widening, is being told which of the page's statements the signature
   // stands behind. The count alone would answer a question nobody asked.
-  if (report.manifest === 'ok' && (report.coveredRows || []).length) {
-    report.notes.push('the signature covers ' + report.coveredRows.length + ' statements this page makes about the file and its records: '
-      + report.coveredRows.join(', ') + '. Anything else on the page is outside it.');
-  }
+  pushNote(report, 'noteCoveredRows', { n: (report.coveredRows || []).length, rows: (report.coveredRows || []).join(', ') },
+    report.manifest === 'ok' && (report.coveredRows || []).length > 0);
   const seams = (report.chain.branches || 0) + (report.chain.restarts || 0);
-  if (seams > 0) report.notes.push(seams + ' chain seam(s): the install signed records at positions it had already used, or restarted');
-  if (report.chain.unattributed > 0) report.notes.push(report.chain.unattributed + ' seam(s) could not be attributed by signature');
+  pushNote(report, 'noteSeams', { n: seams }, seams > 0);
+  pushNote(report, 'noteUnattributed', { n: report.chain.unattributed }, report.chain.unattributed > 0);
   if (report.chain.outside > 0) {
-    if (sel && report.chain.outside <= sel.leftOut) report.notes.push(report.chain.outside + ' record(s) link to records this report left out on purpose; it holds ' + sel.included + ' of the ' + sel.totalSource + ' the install had, chosen by its own gate, and says so under its signature. Ask for the whole record if you need everything.');
-    else report.notes.push(report.chain.outside + ' record(s) name a predecessor that is not in this file');
+    const leftOutOnPurpose = !!sel && report.chain.outside <= sel.leftOut;
+    pushNote(report, 'noteOutsideSelection',
+      { n: report.chain.outside, included: sel ? sel.included : 0, total: sel ? sel.totalSource : 0 }, leftOutOnPurpose);
+    pushNote(report, 'noteOutside', { n: report.chain.outside }, !leftOutOnPurpose);
   }
   // Content withheld. The reader is told plainly, because the headline verdict
   // says "every hash recomputed" and for these records it was not: their
   // content has left the file, so the hash cannot be recomputed and the record
   // stands on a signed redaction marker plus its own signature over that hash.
   // Counted since the marker shipped and printed nowhere until 2026-09-08.
+  //
+  // The sentence used to end "and its signature over that hash was checked",
+  // of all of them. For a withheld record on a rotated key there is no key in
+  // this file to check it under, so it was not checked and the reader was
+  // being told it was (2026-09-18). The same sentence was still reaching a
+  // reader over a record with no signature at all, which is accepted on its
+  // marker and was being counted among the checked (2026-09-19); the two are
+  // one defect met twice, a count that named one reason out of three.
+  //
+  // The three counts are carried as counts rather than as an assembled clause,
+  // because "carries" against "carry" is an English agreement rule and every
+  // language needs its own. redactionSentence() below builds it per language.
   if (report.redacted > 0) {
     const unchecked = redactedOnPriorKey + redactedUnsigned + redactedNoKey;
-    const checked = report.redacted - unchecked;
-    let line = report.redacted + ' record(s) had fields withheld before this file was made: their content is not here, so their hash was not recomputed. Each one is named by a signed redaction marker in this file';
-    // The sentence used to end "and its signature over that hash was checked",
-    // of all of them. For a withheld record on a rotated key there is no key in
-    // this file to check it under, so it was not checked and the reader was
-    // being told it was (2026-09-18). The same sentence was still reaching a
-    // reader over a record with no signature at all, which is accepted on its
-    // marker and was being counted among the checked (2026-09-19); the two are
-    // one defect met twice, a count that named one reason out of three.
-    const why = [];
-    if (redactedUnsigned) why.push(redactedUnsigned + (redactedUnsigned === 1 ? ' carries' : ' carry') + ' no signature at all');
-    if (redactedOnPriorKey) why.push(redactedOnPriorKey + (redactedOnPriorKey === 1 ? ' names' : ' name') + ' a signing key this file does not carry');
-    if (redactedNoKey) why.push(redactedNoKey + ' could not be checked, because this file has no key of its own to check them under');
-    if (unchecked === 0) line += ' and its signature over that hash was checked.';
-    else if (checked === 0) line += ', and none of their signatures were checked: ' + why.join('; ') + ', so the marker is all there is.';
-    else line += '. ' + checked + ' of them had their signature over that hash checked; of the rest, ' + why.join('; ') + ', so for those the marker is all there is.';
-    report.notes.push(line);
+    pushNote(report, 'noteRedacted', {
+      n: report.redacted,
+      checked: report.redacted - unchecked,
+      unsigned: redactedUnsigned,
+      priorKey: redactedOnPriorKey,
+      noKey: redactedNoKey,
+    }, true);
   }
-  if (report.holding.anchors === 0 && !keyStamped) report.notes.push('no independent time stamp in this file: no chain anchor from a public authority and no stamp over the signing key; nothing here shows when these records existed beyond what the install wrote');
-  if (report.anchors.notInFile > 0) report.notes.push(report.anchors.notInFile + ' independently timestamped record(s) are not in this file');
-  if (report.anchors.beyondTail > 0) report.notes.push('an independent timestamp names position ' + report.anchors.beyondPosition + ', past the last record here');
+  pushNote(report, 'noteNoTimeStamp', {}, report.holding.anchors === 0 && !keyStamped);
+  pushNote(report, 'noteStampedNotInFile', { n: report.anchors.notInFile }, report.anchors.notInFile > 0);
+  pushNote(report, 'noteStampBeyond', { position: report.anchors.beyondPosition }, report.anchors.beyondTail > 0);
   report.timestamps = await checkTimestamps(data, v.sha256);
   return report;
 }
 
-function describeTimestamps(ts, lines) {
+/**
+ * The checker's own sentences, per language, from src/forensics/verifier-words.ts.
+ *
+ * M363: this checker took no language at all, so feelingwise.org/check-ro.html
+ * printed an English verdict under a Romanian heading, while the checker built
+ * INTO an export speaks the export's language. The page exists to talk a reader
+ * out of trusting that script, so following our advice cost them their language.
+ *
+ * A locale this table does not carry falls back to English rather than printing
+ * a half-translated report, which reads as broken rather than as honest.
+ */
+const WORDS = {"en":{"holdingMade":", made {when}","holdingBy":" by {version}","holdingKey":", key {fingerprint}","holdingStamps":", {n} independent time stamp(s)","holdingStampsAndKey":" and a stamp over the key","holdingNoStamps":", no independent time stamp","holdingUnchecked":" — the file's own claim, not checked here: with no signed manifest, records removed from the end or put out of order would not show","holdingReport":"You are holding a report: {included} of the {total} records the install had, {leftOut} left out by its own gate","holdingWhole":"You are holding the whole record: {n} record(s), everything the install still had","holdingWholeClaimed":"The file says it is the whole record: {n} record(s)","holdingEnvelope":"You are holding a bare envelope of {n} record(s)","verifiedReport":"VERIFIED as a report of {included} of {total} records: every hash recomputed and every signature checked under the {keys} key(s) this file carries; the signed manifest matches.","verified":"VERIFIED: {n} record(s), every hash recomputed and every signature checked under the {keys} key(s) this file carries; the signed manifest matches.","partial":"PARTIALLY VERIFIED: {n} record(s), no hash failed{andNoSignature}.","partialAndNoSignature":" and no signature failed","partialPriorKey":"{n} record(s) verify by hash only: their signing key is not in this file.","partialUnsigned":"{n} record(s) carry no signature.","partialUncheckable":"{n} record(s) could not have their signature checked.","partialRejected":"{n} record(s) were checked and their signature did not verify; they name no key, so this may be a key that has since rotated rather than an edit, and it is not proof of either.","partialCarriedKey":"{n} record(s) verify under a key that travelled in this file; the file cannot say whose key it is.","brokenAtRecord":"BROKEN at record {position} ({id}): {reason}.","brokenBefore":"BROKEN before any record was checked: {reason}{detail}.","brokenDetail":" ({detail})","broken":"BROKEN.","failedInAll":"{n} record(s) failed in all.","unknownFields":"{n} of them also carry fields this checker does not know ({names}).","checkerOlder":"A checker older than the file fails exactly this way. Check the version of this checker before reading the result as an edit.","noteNoManifest":"no signed manifest: the file was made by a build before 2026-09-06, or the install could not sign it","noteBareEnvelope":"this is a bare JSON envelope: everything in the manifest was checked except the digest over the page rows, which are not present in this form. Ask for the HTML export to check those too.","noteCoveredRows":"the signature covers {n} statements this page makes about the file and its records: {rows}. Anything else on the page is outside it.","noteSeams":"{n} chain seam(s): the install signed records at positions it had already used, or restarted","noteUnattributed":"{n} seam(s) could not be attributed by signature","noteOutsideSelection":"{n} record(s) link to records this report left out on purpose; it holds {included} of the {total} the install had, chosen by its own gate, and says so under its signature. Ask for the whole record if you need everything.","noteOutside":"{n} record(s) name a predecessor that is not in this file","noteRedactedHead":"{n} record(s) had fields withheld before this file was made: their content is not here, so their hash was not recomputed. Each one is named by a signed redaction marker in this file","noteRedactedAllChecked":" and its signature over that hash was checked.","noteRedactedNoneChecked":", and none of their signatures were checked: {why}, so the marker is all there is.","noteRedactedSomeChecked":". {checked} of them had their signature over that hash checked; of the rest, {why}, so for those the marker is all there is.","whyUnsignedOne":"{n} carries no signature at all","whyUnsignedMany":"{n} carry no signature at all","whyPriorKeyOne":"{n} names a signing key this file does not carry","whyPriorKeyMany":"{n} name a signing key this file does not carry","whyNoKey":"{n} could not be checked, because this file has no key of its own to check them under","noteNoTimeStamp":"no independent time stamp in this file: no chain anchor from a public authority and no stamp over the signing key; nothing here shows when these records existed beyond what the install wrote","noteStampedNotInFile":"{n} independently timestamped record(s) are not in this file","noteStampBeyond":"an independent timestamp names position {position}, past the last record here","stamps":"Time-stamp tokens over the chain: {opened} opened; {known} verified under a recognised authority{authorities}; {unknown} under an authority this checker does not recognise; {failed} failed.","stampsAuthorities":" ({list})","stampUnknown":"position {position}: signed by {signer}, root {root}; anyone can run a timestamping service, so this token dates nothing on its own.","stampUnnamed":"an unnamed certificate","stampFailed":"position {position}: failed {why}.","stampFailedUnknown":"unknown","keyExisted":"The signing key existed no later than {when} ({authorities}), by a token over the key as it is in this file.","keyNotDated":"The stamp over the signing key did not verify under a recognised authority; the key is not dated by this file.","labelHolding":"What you are holding","labelVerdict":"What its own cryptography says","labelRaw":"The full report as data","limit":"This checks the file against itself. It does not establish who made the file, whether the key is the original key, or that the file is complete."},"ro":{"holdingMade":", făcut {when}","holdingBy":" de {version}","holdingKey":", cheie {fingerprint}","holdingStamps":", {n} marcă(mărci) de timp independentă(e)","holdingStampsAndKey":" și o marcă peste cheie","holdingNoStamps":", nicio marcă de timp independentă","holdingUnchecked":", ceea ce este afirmația fișierului, neverificată aici: fără un manifest semnat, înregistrările scoase de la sfârșit sau puse în altă ordine nu s-ar vedea","holdingReport":"Ai în mână un raport: {included} din cele {total} înregistrări pe care le avea instalarea, {leftOut} lăsate deoparte de propriul ei filtru","holdingWhole":"Ai în mână înregistrarea întreagă: {n} înregistrare(i), tot ce mai avea instalarea","holdingWholeClaimed":"Fișierul spune că este înregistrarea întreagă: {n} înregistrare(i)","holdingEnvelope":"Ai în mână un plic simplu cu {n} înregistrare(i)","verifiedReport":"VERIFICAT ca raport al {included} din {total} înregistrări: fiecare hash a fost recalculat și fiecare semnătură verificată cu cele {keys} chei pe care le poartă acest fișier; manifestul semnat corespunde.","verified":"VERIFICAT: {n} înregistrare(i), fiecare hash a fost recalculat și fiecare semnătură verificată cu cele {keys} chei pe care le poartă acest fișier; manifestul semnat corespunde.","partial":"VERIFICAT PARȚIAL: {n} înregistrare(i), niciun hash nu a eșuat{andNoSignature}.","partialAndNoSignature":" și nicio semnătură nu a eșuat","partialPriorKey":"{n} înregistrare(i) se verifică doar prin hash: cheia lor de semnare nu se află în acest fișier.","partialUnsigned":"{n} înregistrare(i) nu poartă semnătură.","partialUncheckable":"{n} înregistrare(i) nu au putut avea semnătura verificată.","partialRejected":"{n} înregistrare(i) au fost verificate și semnătura lor nu a trecut; ele nu numesc nicio cheie, deci poate fi o cheie rotită între timp, nu o modificare, și nu este dovada niciuneia.","partialCarriedKey":"{n} înregistrare(i) se verifică sub o cheie care a călătorit în acest fișier; fișierul nu poate spune a cui este cheia.","brokenAtRecord":"EȘUAT la înregistrarea {position} ({id}): {reason}.","brokenBefore":"EȘUAT înainte să fie verificată vreo înregistrare: {reason}{detail}.","brokenDetail":" ({detail})","broken":"EȘUAT.","failedInAll":"{n} înregistrare(i) au eșuat în total.","unknownFields":"{n} dintre ele poartă și câmpuri pe care acest verificator nu le cunoaște ({names}).","checkerOlder":"Un verificator mai vechi decât fișierul eșuează exact în acest fel. Verifică versiunea acestui verificator înainte să citești rezultatul ca pe o modificare.","noteNoManifest":"niciun manifest semnat: fișierul a fost făcut de o versiune dinainte de 2026-09-06, sau instalarea nu l-a putut semna","noteBareEnvelope":"acesta este un plic JSON simplu: totul din manifest a fost verificat în afară de amprenta peste rândurile paginii, care nu sunt prezente în această formă. Cere exportul HTML ca să le verifici și pe acelea.","noteCoveredRows":"semnătura acoperă {n} afirmații pe care această pagină le face despre fișier și despre înregistrările lui: {rows}. Orice altceva de pe pagină este în afara ei.","noteSeams":"{n} cusătură(i) în lanț: instalarea a semnat înregistrări pe poziții pe care le folosise deja, sau a luat-o de la capăt","noteUnattributed":"{n} cusătură(i) nu au putut fi atribuite prin semnătură","noteOutsideSelection":"{n} înregistrare(i) se leagă de înregistrări pe care acest raport le-a lăsat deoparte intenționat; el conține {included} din cele {total} pe care le avea instalarea, alese de propriul lui filtru, și spune asta sub semnătura lui. Cere înregistrarea întreagă dacă ai nevoie de tot.","noteOutside":"{n} înregistrare(i) numesc o predecesoare care nu se află în acest fișier","noteRedactedHead":"{n} înregistrare(i) au avut câmpuri reținute înainte ca acest fișier să fie făcut: conținutul lor nu este aici, deci hash-ul lor nu a fost recalculat. Fiecare este numită de o marcă de redactare semnată din acest fișier","noteRedactedAllChecked":" iar semnătura ei peste acel hash a fost verificată.","noteRedactedNoneChecked":", și niciuna dintre semnăturile lor nu a fost verificată: {why}, deci marca este tot ce există.","noteRedactedSomeChecked":". {checked} dintre ele au avut semnătura peste acel hash verificată; dintre restul, {why}, deci pentru acelea marca este tot ce există.","whyUnsignedOne":"{n} nu poartă nicio semnătură","whyUnsignedMany":"{n} nu poartă nicio semnătură","whyPriorKeyOne":"{n} numește o cheie de semnare pe care acest fișier nu o poartă","whyPriorKeyMany":"{n} numesc o cheie de semnare pe care acest fișier nu o poartă","whyNoKey":"{n} nu au putut fi verificate, pentru că acest fișier nu are o cheie proprie cu care să le verifice","noteNoTimeStamp":"nicio marcă de timp independentă în acest fișier: nicio ancoră de lanț de la o autoritate publică și nicio marcă peste cheia de semnare; nimic de aici nu arată când au existat aceste înregistrări dincolo de ce a scris instalarea","noteStampedNotInFile":"{n} înregistrare(i) marcate independent în timp nu se află în acest fișier","noteStampBeyond":"o marcă de timp independentă numește poziția {position}, dincolo de ultima înregistrare de aici","stamps":"Mărci de timp peste lanț: {opened} deschise; {known} verificate sub o autoritate recunoscută{authorities}; {unknown} sub o autoritate pe care acest verificator nu o recunoaște; {failed} eșuate.","stampsAuthorities":" ({list})","stampUnknown":"poziția {position}: semnată de {signer}, rădăcină {root}; oricine poate rula un serviciu de marcare a timpului, deci această marcă nu datează nimic de una singură.","stampUnnamed":"un certificat fără nume","stampFailed":"poziția {position}: a eșuat {why}.","stampFailedUnknown":"necunoscut","keyExisted":"Cheia de semnare exista cel târziu la {when} ({authorities}), pe baza unei mărci peste cheie așa cum se află ea în acest fișier.","keyNotDated":"Marca peste cheia de semnare nu s-a verificat sub o autoritate recunoscută; cheia nu este datată de acest fișier.","labelHolding":"Ce ai în mână","labelVerdict":"Ce spune propria ei criptografie","labelRaw":"Raportul complet, ca date","limit":"Aceasta verifică fișierul față de el însuși. Nu stabilește cine a făcut fișierul, dacă cheia este cheia originală, sau că fișierul este complet."}};
+const DEFAULT_LOCALE = 'en';
+
+function wordsFor(lang) {
+  return (lang && Object.prototype.hasOwnProperty.call(WORDS, lang)) ? WORDS[lang] : WORDS[DEFAULT_LOCALE];
+}
+
+/** {name} substitution, the placeholder convention src/i18n/export-strings.ts uses. */
+function fmt(template, values) {
+  return String(template).replace(/\{(\w+)\}/g, function (whole, name) {
+    return Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : whole;
+  });
+}
+
+/**
+ * Record a note once, as English prose AND as the key and numbers behind it.
+ *
+ * report.notes keeps EXACTLY the English strings it always held, so the JSON
+ * report, --json, the receiver that stores a reading, and three tests that
+ * search those strings are all untouched. report.noteParts is the same notes
+ * as data, which is what lets describe() print them in a language chosen after
+ * the file was read. Translating the checker and changing the shape of its
+ * published report are two changes; only one of them is being made here.
+ */
+function pushNote(report, key, values, when) {
+  if (!when) return;
+  if (!report.noteParts) report.noteParts = [];
+  report.noteParts.push({ key: key, values: values });
+  report.notes.push(key === 'noteRedacted'
+    ? redactionSentence(WORDS[DEFAULT_LOCALE], values)
+    : fmt(WORDS[DEFAULT_LOCALE][key], values));
+}
+
+/**
+ * The withheld-records note, assembled per language.
+ *
+ * Built rather than stored because "carries" against "carry" is an English
+ * agreement rule, and a language with different rules needs its own strings
+ * rather than a fragment glued on. The three reasons are carried as counts.
+ */
+function redactionSentence(w, v) {
+  const why = [];
+  if (v.unsigned) why.push(fmt(v.unsigned === 1 ? w.whyUnsignedOne : w.whyUnsignedMany, { n: v.unsigned }));
+  if (v.priorKey) why.push(fmt(v.priorKey === 1 ? w.whyPriorKeyOne : w.whyPriorKeyMany, { n: v.priorKey }));
+  if (v.noKey) why.push(fmt(w.whyNoKey, { n: v.noKey }));
+  const head = fmt(w.noteRedactedHead, { n: v.n });
+  const unchecked = v.unsigned + v.priorKey + v.noKey;
+  if (unchecked === 0) return head + w.noteRedactedAllChecked;
+  if (v.checked === 0) return head + fmt(w.noteRedactedNoneChecked, { why: why.join('; ') });
+  return head + fmt(w.noteRedactedSomeChecked, { checked: v.checked, why: why.join('; ') });
+}
+
+/** The notes in the reader's language, falling back to whatever prose the report carries. */
+function notesIn(report, w) {
+  if (!report.noteParts) return report.notes || [];
+  return report.noteParts.map((p) => (p.key === 'noteRedacted'
+    ? redactionSentence(w, p.values)
+    : fmt(w[p.key], p.values)));
+}
+
+function describeTimestamps(ts, lines, w) {
   if (!ts) return;
   if (ts.anchors.length) {
     const known = ts.anchors.filter((a) => a.ok && a.authority);
     const unknown = ts.anchors.filter((a) => a.ok && !a.authority);
     const failed = ts.anchors.filter((a) => !a.ok);
-    lines.push('Time-stamp tokens over the chain: ' + ts.anchors.length + ' opened; ' + known.length + ' verified under a recognised authority'
-      + (known.length ? ' (' + Array.from(new Set(known.map((a) => a.authority))).join(', ') + ')' : '')
-      + '; ' + unknown.length + ' under an authority this checker does not recognise; ' + failed.length + ' failed.');
-    for (const a of unknown) lines.push('  position ' + a.position + ': signed by ' + (a.signer || 'an unnamed certificate') + ', root ' + (a.rootCertSha256 || '?') + '; anyone can run a timestamping service, so this token dates nothing on its own.');
-    for (const a of failed) lines.push('  position ' + a.position + ': failed ' + (a.failed.length ? a.failed.join(', ') : (a.error || 'unknown')) + '.');
+    const list = known.length
+      ? fmt(w.stampsAuthorities, { list: Array.from(new Set(known.map((a) => a.authority))).join(', ') })
+      : '';
+    lines.push(fmt(w.stamps, {
+      opened: ts.anchors.length, known: known.length, authorities: list,
+      unknown: unknown.length, failed: failed.length,
+    }));
+    for (const a of unknown) {
+      lines.push('  ' + fmt(w.stampUnknown, {
+        position: a.position, signer: a.signer || w.stampUnnamed, root: a.rootCertSha256 || '?',
+      }));
+    }
+    for (const a of failed) {
+      lines.push('  ' + fmt(w.stampFailed, {
+        position: a.position, why: a.failed.length ? a.failed.join(', ') : (a.error || w.stampFailedUnknown),
+      }));
+    }
   }
   if (ts.keyGenesis) {
     const g = ts.keyGenesis;
-    if (g.existedBy) lines.push('The signing key existed no later than ' + g.existedBy + ' (' + g.authorities.join(', ') + '), by a token over the key as it is in this file.');
-    else lines.push('The stamp over the signing key did not verify under a recognised authority; the key is not dated by this file.');
+    if (g.existedBy) lines.push(fmt(w.keyExisted, { when: g.existedBy, authorities: g.authorities.join(', ') }));
+    else lines.push(w.keyNotDated);
   }
 }
 
-function describeHolding(h) {
+function describeHolding(h, w) {
   if (!h) return null;
-  const when = h.generatedAt ? ', made ' + h.generatedAt.replace('T', ' ').replace(/\.\d+Z$/, ' UTC') : '';
-  const by = h.fwVersion ? ' by ' + h.fwVersion : '';
-  const key = h.fingerprint ? ', key ' + h.fingerprint : '';
-  const stamps = h.anchors > 0 || h.keyStamped ? ', ' + h.anchors + ' independent time stamp(s)' + (h.keyStamped ? ' and a stamp over the key' : '') : ', no independent time stamp';
+  const when = h.generatedAt ? fmt(w.holdingMade, { when: h.generatedAt.replace('T', ' ').replace(/\.\d+Z$/, ' UTC') }) : '';
+  const by = h.fwVersion ? fmt(w.holdingBy, { version: h.fwVersion }) : '';
+  const key = h.fingerprint ? fmt(w.holdingKey, { fingerprint: h.fingerprint }) : '';
+  const stamps = h.anchors > 0 || h.keyStamped
+    ? fmt(w.holdingStamps, { n: h.anchors }) + (h.keyStamped ? w.holdingStampsAndKey : '')
+    : w.holdingNoStamps;
   // Completeness is the file's claim until a signed manifest makes it a checked
   // one. Without that manifest the chain walk cannot see records removed from
   // the END (nothing in the file points at them) nor a reordering (each link
@@ -1665,40 +1760,46 @@ function describeHolding(h) {
   //
   // So the checker must not print "everything the install still had" as its own
   // finding on a file it cannot check that on. It says whose claim it is.
-  const unchecked = h.manifestOk ? '' : ' — the file\'s own claim, not checked here: with no signed manifest, records removed from the end or put out of order would not show';
-  if (h.kind === 'report') return 'You are holding a report: ' + h.included + ' of the ' + h.totalSource + ' records the install had, ' + h.leftOut + ' left out by its own gate' + when + by + key + stamps + (h.manifestOk ? '' : unchecked) + '.';
+  const unchecked = h.manifestOk ? '' : w.holdingUnchecked;
+  if (h.kind === 'report') {
+    return fmt(w.holdingReport, { included: h.included, total: h.totalSource, leftOut: h.leftOut })
+      + when + by + key + stamps + (h.manifestOk ? '' : unchecked) + '.';
+  }
   if (h.kind === 'whole-record') {
     return h.manifestOk
-      ? 'You are holding the whole record: ' + h.records + ' record(s), everything the install still had' + when + by + key + stamps + '.'
-      : 'The file says it is the whole record: ' + h.records + ' record(s)' + when + by + key + stamps + unchecked + '.';
+      ? fmt(w.holdingWhole, { n: h.records }) + when + by + key + stamps + '.'
+      : fmt(w.holdingWholeClaimed, { n: h.records }) + when + by + key + stamps + unchecked + '.';
   }
-  return 'You are holding a bare envelope of ' + h.records + ' record(s)' + when + by + key + stamps + unchecked + '.';
+  return fmt(w.holdingEnvelope, { n: h.records }) + when + by + key + stamps + unchecked + '.';
 }
 
-function describe(report) {
+function describe(report, lang) {
+  const w = wordsFor(lang);
   const lines = [];
-  const holding = describeHolding(report.holding);
+  const holding = describeHolding(report.holding, w);
   if (holding) lines.push(holding);
   if (report.state === 'verified' && report.holding && report.holding.kind === 'report' && report.chain && report.chain.outside > 0) {
-    lines.push('VERIFIED as a report of ' + report.holding.included + ' of ' + report.holding.totalSource + ' records: every hash recomputed and every signature checked under the ' + report.keys + ' key(s) this file carries; the signed manifest matches.');
+    lines.push(fmt(w.verifiedReport, { included: report.holding.included, total: report.holding.totalSource, keys: report.keys }));
   } else if (report.state === 'verified') {
-    lines.push('VERIFIED: ' + report.records + ' record(s), every hash recomputed and every signature checked under the ' + report.keys + ' key(s) this file carries; the signed manifest matches.');
+    lines.push(fmt(w.verified, { n: report.records, keys: report.keys }));
   } else if (report.state === 'partial') {
     // "no signature failed" is only sayable when none did. A signature that was
     // run and returned false is not a signature that could not be checked.
-    lines.push('PARTIALLY VERIFIED: ' + report.records + ' record(s), no hash failed'
-      + (report.unverified.signatureRejected > 0 ? '' : ' and no signature failed') + '.');
-    if (report.unverified.priorKey > 0) lines.push('  ' + report.unverified.priorKey + ' record(s) verify by hash only: their signing key is not in this file.');
-    if (report.unverified.unsigned > 0) lines.push('  ' + report.unverified.unsigned + ' record(s) carry no signature.');
-    if (report.unverified.signatureUnverified > 0) lines.push('  ' + report.unverified.signatureUnverified + ' record(s) could not have their signature checked.');
-    if (report.unverified.signatureRejected > 0) lines.push('  ' + report.unverified.signatureRejected + ' record(s) were checked and their signature did not verify; they name no key, so this may be a key that has since rotated rather than an edit, and it is not proof of either.');
-    if (report.carriedKey > 0) lines.push('  ' + report.carriedKey + ' record(s) verify under a key that travelled in this file; the file cannot say whose key it is.');
+    lines.push(fmt(w.partial, {
+      n: report.records,
+      andNoSignature: report.unverified.signatureRejected > 0 ? '' : w.partialAndNoSignature,
+    }));
+    if (report.unverified.priorKey > 0) lines.push('  ' + fmt(w.partialPriorKey, { n: report.unverified.priorKey }));
+    if (report.unverified.unsigned > 0) lines.push('  ' + fmt(w.partialUnsigned, { n: report.unverified.unsigned }));
+    if (report.unverified.signatureUnverified > 0) lines.push('  ' + fmt(w.partialUncheckable, { n: report.unverified.signatureUnverified }));
+    if (report.unverified.signatureRejected > 0) lines.push('  ' + fmt(w.partialRejected, { n: report.unverified.signatureRejected }));
+    if (report.carriedKey > 0) lines.push('  ' + fmt(w.partialCarriedKey, { n: report.carriedKey }));
   } else {
     const first = report.failures[0];
-    if (first && first.index >= 0) lines.push('BROKEN at record ' + (first.index + 1) + ' (' + first.id + '): ' + first.reason + '.');
-    else if (first) lines.push('BROKEN before any record was checked: ' + first.reason + (first.detail ? ' (' + first.detail + ')' : '') + '.');
-    else lines.push('BROKEN.');
-    if (report.failures.length > 1) lines.push('  ' + report.failures.length + ' record(s) failed in all.');
+    if (first && first.index >= 0) lines.push(fmt(w.brokenAtRecord, { position: first.index + 1, id: first.id, reason: first.reason }));
+    else if (first) lines.push(fmt(w.brokenBefore, { reason: first.reason, detail: first.detail ? fmt(w.brokenDetail, { detail: first.detail }) : '' }));
+    else lines.push(w.broken);
+    if (report.failures.length > 1) lines.push('  ' + fmt(w.failedInAll, { n: report.failures.length }));
     // The other explanation, when the record carries fields this checker has
     // never heard of: a checker older than the file cannot hash a key that was
     // appended later, so a sound file fails here. The verdict above does not
@@ -1707,17 +1808,15 @@ function describe(report) {
     const unknown = report.failures.filter((f) => f.unknownFields && f.unknownFields.length);
     if (unknown.length > 0) {
       const names = [...new Set(unknown.flatMap((f) => f.unknownFields))].sort();
-      lines.push('  ' + unknown.length + ' of them also carry fields this checker does not know (' + names.join(', ') + ').');
-      lines.push('  A checker older than the file fails exactly this way. Check the version of this checker before reading the result as an edit.');
+      lines.push('  ' + fmt(w.unknownFields, { n: unknown.length, names: names.join(', ') }));
+      lines.push('  ' + w.checkerOlder);
     }
   }
-  for (const n of report.notes) lines.push('  ' + n);
-  describeTimestamps(report.timestamps, lines);
-  lines.push(LIMIT_SENTENCE);
+  for (const n of notesIn(report, w)) lines.push('  ' + n);
+  describeTimestamps(report.timestamps, lines, w);
+  lines.push(w.limit);
   return lines.join('\n');
 }
-
-const LIMIT_SENTENCE = 'This checks the file against itself. It does not establish who made the file, whether the key is the original key, or that the file is complete.';
 
 /**
  * The same reading as describe(), laid out for a page: what the reader is
@@ -1726,9 +1825,15 @@ const LIMIT_SENTENCE = 'This checks the file against itself. It does not establi
  * textContent only; nothing from the file is rendered as markup. The three
  * pages that check a file (verifier/index.html, the site's check pages) call
  * this and add nothing of their own, so the design is one and drift-locked.
+ *
+ * The lang argument is the PAGE's language, not the file's. A Romanian reader on the
+ * Romanian page gets a Romanian reading of an export made in any language,
+ * because the verdict is this checker's statement about the file rather than
+ * anything the file says about itself.
  */
-function render(report, root) {
+function render(report, root, lang) {
   if (typeof document === 'undefined' || !root) return;
+  const w = wordsFor(lang);
   while (root.firstChild) root.removeChild(root.firstChild);
   const el = (tag, cls, text) => {
     const e = document.createElement(tag);
@@ -1736,19 +1841,19 @@ function render(report, root) {
     if (text !== undefined && text !== null) e.textContent = String(text);
     return e;
   };
-  const lines = describe(report).split('\n');
+  const lines = describe(report, lang).split('\n');
   const holding = report.holding ? lines.shift() : null;
   const verdict = lines.shift() || '';
-  const rest = lines.filter((l) => l !== LIMIT_SENTENCE).map((l) => l.trim()).filter(Boolean);
+  const rest = lines.filter((l) => l !== w.limit).map((l) => l.trim()).filter(Boolean);
   const card = el('div', 'fw-check fw-check-' + (report.state || 'failed'));
   if (holding) {
     const h = el('div', 'fw-check-holding');
-    h.appendChild(el('div', 'fw-check-label', 'What you are holding'));
+    h.appendChild(el('div', 'fw-check-label', w.labelHolding));
     h.appendChild(el('p', null, holding));
     card.appendChild(h);
   }
   const band = el('div', 'fw-check-verdict');
-  band.appendChild(el('div', 'fw-check-label', 'What its own cryptography says'));
+  band.appendChild(el('div', 'fw-check-label', w.labelVerdict));
   band.appendChild(el('p', 'fw-check-verdict-line', verdict));
   card.appendChild(band);
   if (rest.length) {
@@ -1756,9 +1861,9 @@ function render(report, root) {
     for (const line of rest) list.appendChild(el('li', null, line));
     card.appendChild(list);
   }
-  card.appendChild(el('p', 'fw-check-limit', LIMIT_SENTENCE));
+  card.appendChild(el('p', 'fw-check-limit', w.limit));
   const details = el('details', 'fw-check-raw');
-  details.appendChild(el('summary', null, 'The full report as data'));
+  details.appendChild(el('summary', null, w.labelRaw));
   details.appendChild(el('pre', null, JSON.stringify(report, null, 2)));
   card.appendChild(details);
   root.appendChild(card);

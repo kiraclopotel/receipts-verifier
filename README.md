@@ -66,6 +66,91 @@ signed them signed them. The extension's own methodology, and the measured
 accuracy of the optional AI reading, are described inside every export and at
 feelingwise.org/research.
 
+
+## corroborate: what more than one recorder saw
+
+A signed record proves nothing was altered after signing. It proves nothing at
+all about whether the thing was ever served, because the signature goes on
+after the text is in hand, so a fabricated post signs exactly as cleanly as a
+real one. That is the largest gap in the section above, and no amount of
+cryptography closes it inside one file.
+
+What does reach it is other people. An observation earns weight in proportion
+to how many unrelated observers recorded the same item being served.
+
+```
+node corroborate.mjs export-a.html export-b.html
+node corroborate.mjs export-a.html export-b.html --json
+```
+
+It computes the content identity defined in `FORMAT.md` section 9 for every
+record and reports what more than one recorder holds. It contacts nothing.
+
+Three things it will not do, and they are the reason to trust the number:
+
+- **It will not call one recorder two.** Files are grouped by the signing key
+  they carry. Two exports from the same install are one person seeing something
+  twice, which is not agreement about anything, and the tool says so and stops.
+  A file that states no key is kept in a group of its own rather than assumed
+  to be somebody new.
+- **It will not compare a caption the page only partly carried.** A text cut at
+  a "show more" control is less text, not the same text worn differently, and
+  the cut point moves with the viewport. Records written before the capture
+  state was recorded answer "unknown" and are left out rather than guessed at.
+- **It will not verify anything.** Run `verify-export.mjs` on each file first.
+  Identities computed from a file that does not verify are identities out of a
+  document that says whatever somebody last typed into it.
+
+And what a result does not mean: that two recorders hold one identity means two
+files contain the same text. It does not date either sighting, does not say
+either person saw it on a platform, and is not by itself evidence that anything
+was served. Short text corroborates trivially, because two people posting the
+same three words produce one identity by definition.
+## observations: what was served, with no reading of it
+
+A record carries two different kinds of thing. "This text was served at this
+time, in this surface, by this account" is an observation. "This is a fear
+appeal at severity 5" is a reading, by a named model, at a stated confidence.
+The first is a fact about the world. The second is the output of a model whose
+behaviour changes between releases, so nobody doing measurement can cite it and
+expect the number to mean the same thing next year.
+
+```
+node observations.mjs export.html > observations.csv
+node observations.mjs export.html --json --out observations.json
+```
+
+This writes the first kind and nothing else: no rewrite, no technique, no score,
+no verdict, no model name. Each row keeps its `integrityHash` and its chain
+position, so any row can be found again in the signed file it came from, and
+carries the content identity from section 9 of FORMAT.md beside the text.
+
+It is a PROJECTION, not evidence and not a signed artefact. The signed export is
+the evidence; this is reproducible from it by anybody running the same tool over
+the same file, which is the property that makes it citeable. The header names
+the source file and its SHA-256, and those belong beside any table built from
+it.
+
+Two more things it will not do. It has not verified anything: run
+`verify-export.mjs` on the source file first. And it leaves out the records that
+are not observations of a served item, counting them in the header rather than
+dropping them silently: the nine kinds of chain marker, analysis records, and
+any record withheld at the recorded person's request, where a row with no text
+would read as "nothing was served".
+
+It does carry the account names and addresses the sites showed, because those
+are part of what was served. Treat the file as personal data.
+
+**Why this is not a signed export with the readings removed.** A record's
+signature covers a hash of all its fields together, readings included, so
+removing a field makes the hash unrecomputable. The format does have a mechanism
+for that, the signed redaction marker, and it does not fit: a marker binds to
+one record, so an export of 130,000 records would need 130,000 more records to
+say what was withheld. The alternative, a file-wide declaration, would be a
+format change that every already-published copy of `verify-export.mjs` would
+reject, and handing somebody a file that our own published checker calls broken
+is worse than handing them a projection.
+
 ## Receiving donated exports
 
 Receipts carries a "Send this export to <organisation>" button that POSTs the
