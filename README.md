@@ -52,7 +52,8 @@ The three readings:
 - **PARTIALLY VERIFIED**: nothing failed, but something could not be checked.
   The reasons are printed: records whose signing key is not in the file, records
   with no signature, a file made before the manifest existed, a key that
-  travelled inside the file, a chain seam, a timestamped record that is missing.
+  travelled inside the file, a chain seam, records a restore set aside, a
+  timestamped record that is missing.
 - **BROKEN**: a hash or a signature did not match, or the manifest did not.
   The first failing record and the reason are printed.
 
@@ -192,8 +193,10 @@ whole file. Compare 20 against 05 in EXPECTED.json, not against 13. The last fou
 rotation marker whose signed link names the last record of the month before, which reads VERIFIED
 because positions restart at 0 every month on purpose; and the same file three more times, with the
 link naming a record that is not there, naming a record in the middle of the month, and on a marker
-that carries no signature. Each of those three reads partial, because nothing in the file shows
-which run the marker follows. Every record in them is invented and the file says so. A program
+that carries no signature. Each of those three reads partial. The first and the last do because
+nothing in the file shows which run the marker follows. The middle one links, and the two records
+after the one it names are counted as set aside, the shape a restore from a backup leaves, because
+the file cannot say whether a restore or a rewrite with the same key made them. Every record in them is invented and the file says so. A program
 that implements this checker, or a recorder that produces this format, can run
 over these files and compare its readings to `EXPECTED.json`. They are built
 once by `scripts/build-verifier-vectors.ts` in the FeelingWise tree and

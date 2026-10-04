@@ -50,6 +50,16 @@ The envelope is a JSON object with these keys, all present:
   not make this comparison, for the reason given under `provenanceDigest`.
   `profile` is never evidence of who made anything: section 7 applies to it as
   it applies to the key.
+- `unreadableArchivedRows`: how many archived records the install holds and
+  could not read when it made the file, so they are not in it. Present only in
+  a whole-record file that has such records, and absent otherwise, so every
+  other file is exactly as it was before the key existed. Like `profile` it is
+  under no digest, for the same reason, and it is held down the same way: the
+  page renders it as the provenance row `unreadableRows`, whose text begins with
+  the count, under `provenanceDigest`. A checker MUST take the count only when
+  the manifest verified and that row begins with the same whole number, and
+  otherwise read the file as if the key were absent. The count names a cause
+  and never changes a reading: section 4 says what it explains.
 - `manifest`: the signed manifest over the envelope (section 5), present in
   files made by builds from 2026-09-06 on. A file without it can read at most
   PARTIALLY VERIFIED.
@@ -133,7 +143,8 @@ call's fields, or null), `rails` (the deterministic rules that fired, each with
 a short match token), `household` (mode, reader, the topic rule that applied or
 null, whether swearing was masked), `row` (the policy row that fired), `action`
 (what the policy said), `applied` (what the page showed), `rewrite` (attempted
-and outcome, or null) and `note` (one sentence when `applied` differs from
+and outcome, and `model`, the model whose rewrite the page showed, when a model
+wrote it and its reply named the model; or null) and `note` (one sentence when `applied` differs from
 `action`, else null). A record without `decision` states nothing about why; it
 is not an allowance. On a record that carries `decision`, `verdict` is derived from
 `applied`: allow, context, mask and record are `pass`; mark and soften are `flagged`;
@@ -228,6 +239,7 @@ reader
 buildId
 verdictOrigin
 authorCapture
+authorName
 ```
 
 Defaults: `aiModel`, `aiProvider` and `detectionMode` default to `""`;
@@ -408,20 +420,106 @@ reset, and each writes a marker at position 0 whose `prevRecordHash` is the
 constant `feelingwise-chain-genesis-v1` and whose `priorChainHash`, which is
 inside the hashed payload, is the `integrityHash` of the last record of the run
 it follows. A checker MUST start a new run at a `month-rotation-marker` or a
-`reset-marker` at position 0 when three things hold: its `priorChainHash` is the
-`integrityHash` of a record in the file; no record in the file names that record
-in `prevRecordHash`, which is what being the last of a run means inside a file;
-and the marker's own signature verified under a key. Positions after such a
-marker are compared only with each other, and the marker's own `prevRecordHash`
-is not counted as a predecessor outside the file, because the constant names no
-record. When any of the three fails, nothing in the file shows which run the
-marker follows, and a checker MUST count reused positions as branches exactly as
-it would without the marker. `vectors/21-month-rotation-linked.html` reads
-`verified`; `22-month-rotation-unlinked.html` (the record is not in the file),
-`23-month-rotation-names-a-middle-record.html` and
-`24-month-rotation-marker-unsigned.html` each read `partial` with three
-branches. Until 2026-09-20 the reference checker did not read the link, and
-every whole-record file that crossed a month boundary read PARTIALLY VERIFIED.
+`reset-marker` at position 0 when two things hold: its `priorChainHash` is the
+`integrityHash` of a record in the file, and the marker's own signature verified
+under a key. Positions after such a marker are compared only with each other.
+When either fails, nothing in the file shows which run the marker follows, and a
+checker MUST count reused positions as branches exactly as it would without the
+marker.
+
+The record a linked marker names may already have a successor in the file. A
+restore from a backup leaves exactly that: the backup puts back an older state
+of the chain, the records written after the backup stay in the month archive and
+so in every whole-record export, and the next reset or rotation names the record
+the restore went back to. From that record the file then goes on two ways, the
+new run and a line the record did not keep.
+
+To count those lines, give every record one parent: for a linked marker, the
+record its `priorChainHash` names; for any other record, the record its
+`prevRecordHash` names, when that record is in the file. A record's children are
+the records whose parent it is, so a linked marker goes on from the record it
+names exactly as a successor does. A record that a linked marker names is a fork,
+and at a fork one child carries on the line the record kept:
+
+- The kept line is read back from the newest record in the file: the last record,
+  in file order, whose `chainPosition` is a number of 0 or more and whose
+  `chainAnchor` is not `pre-rekey`. Its parent, that record's parent, and so on
+  back while each is in the file and none repeats, make the kept line. A
+  whole-record export puts the archive first, then the live chain, then the
+  records of earlier keys, so the kept line is the one the install is on now. At
+  a fork on the kept line, the child on it is kept.
+- At a fork the kept line does not pass through, the last linked marker in the
+  file that names the fork is kept. That happens when a record missing from the
+  file breaks the way back, and when the fork is itself on a line set aside.
+
+A checker MUST count as `chain.setAside` every other child of every fork and
+every record that goes on from each of them, child after child, each record once. It MUST count them before it
+compares any position, and MUST NOT count them again as branches, whether the
+file puts them before the marker or after it. It MUST report the count at each
+fork in `chain.setAsideLines` as `{position, n}`, the fork's `chainPosition` and
+the number of records counted there, one entry per fork with anything counted,
+in the file order of the first linked marker naming each fork. A file with
+anything set aside reads `partial`, and no `selection` excuses it: nothing signed
+in the file says whether a restore made the line or somebody holding the key
+replaced the newest records and signed the replacements, and the note MUST say
+that it cannot tell which. This is also why linking to a record in the middle of
+a run erases nothing: the named record then has at least two children and only
+one is kept, so the other line is still counted, as set aside instead of as
+branches.
+
+Four layouts show the rule, each read from signed records by this checker. A
+backup at position 5, a reset, three records, the backup restored and a reset
+again: 4 set aside from position 5, the first reset and its three records. A
+backup at position 5, two records, a reset naming position 7, three records, the
+backup restored and a reset: 6 set aside from position 5. Two restores to one
+backup at position 5 with two records written between them, then a reset: 4 set
+aside and no branch. Backups at positions 5 and 7, the first restored, a reset
+and four records, then the second restored and a reset: 5 set aside from
+position 5, the first reset and its four records, however long recording then
+goes on, because the record went on from position 7.
+
+The file's order decides which line was kept, because nothing signed says so. A
+file that puts a side line after the live chain is read as keeping that line.
+
+The genesis constant is not a record, so a `month-rotation-marker` or a
+`reset-marker` at position 0 is never counted as naming a predecessor outside
+the file for its `prevRecordHash`, whether or not it links. What such a marker
+follows is its `priorChainHash`: when that is a non-empty value that names no
+record in the file, the marker counts as one record outside the file. The first
+record in a file is the exception it always was, and names nothing.
+
+`vectors/21-month-rotation-linked.html` reads `verified`.
+`22-month-rotation-unlinked.html` (the record named is not in the file) reads
+`partial` with three branches and one record outside.
+`23-month-rotation-names-a-middle-record.html` names the first record of the
+month before, so it links and reads `partial` with two records set aside from
+position 0, no branch and nothing outside. `24-month-rotation-marker-unsigned.html`
+names the right record on a marker with no signature, so it does not link, and
+reads `partial` with three branches and nothing outside. Until 2026-09-20 the
+reference checker did not read the link, and every whole-record file that
+crossed a month boundary read PARTIALLY VERIFIED. Until 2026-09-23 it also
+refused to link a marker whose named record had a successor, so a whole-record
+export made after a restore and a reset counted every position the two runs
+shared, 8 in a file of 21 records made by the product's own buttons, and named
+the reset marker's genesis constant as a missing predecessor.
+
+A cut before a reset cannot be counted the same way. When the records at the end
+of the chain a reset retired are missing, the record the marker names is missing
+too, and the file carries no position for a record it does not hold, so how many
+were cut cannot be read from it. It reads `partial` with that one record
+outside, and the reused positions count as branches because nothing links.
+
+An archived record the install could not read leaves the same hole a removal
+leaves: the record after it names a predecessor outside the file, and its
+position is missing from its run. When a checker has taken the file's
+`unreadableArchivedRows` (section 1) and the records outside the file are no
+more than that count, its note MUST name that cause, as the install's statement
+under its signature, and MUST NOT offer a filtered extract or a removal as the
+explanation. The reading stays `partial`: the count explains the holes and does
+not fill them, and nothing signed says which records they were. When the record
+that could not be read is the one a later marker names, the marker does not
+link, so the positions after it are compared with the run before it as for any
+unlinked marker.
 
 A seam is also either attributed or not, and the rule is narrower than it
 sounds. It is attributed only when the records on BOTH sides of it came back
@@ -465,7 +563,8 @@ The reading:
 - **partial** (PARTIALLY VERIFIED): nothing failed but something is `unsigned`,
   `prior-key`, `signature-did-not-verify` or `carriedKey`; or there is a seam, a
   branch or a record outside the file that the file's own selection does not
-  account for; or an anchor names something not here; or there is no manifest.
+  account for; or any record is set aside; or an anchor names something not
+  here; or there is no manifest.
 - **verified** (VERIFIED): none of the above, and the manifest verifies. A
   report reads VERIFIED as a report when its `selection` block (under the
   manifest) says `included` equals the records present and the records
@@ -551,7 +650,8 @@ digest is SHA-256, lowercase hex:
   about the records in it, and nothing that is decoration. In the reference
   recorder that is: the record count, the flagged counts and the flagged share,
   the unattended count, the builds, what was held back and what it was drawn
-  from, the chain range and every coverage row, the recorded date range, the
+  from, the chain range and every coverage row, the count of archived records
+  the install could not read, the recorded date range, the
   signing key fingerprint, the conditions, the per-key table and the count of
   keys above it, why the key exists, when the key was made, the build that
   recorded it, the maker and the machine, the precision disclosure, the
@@ -670,10 +770,11 @@ fields are normative and were defined nowhere; an implementer had to reverse the
 comparison target from the comparison target.
 
 EXPECTED.json is a PROJECTION of a report and not a report. It carries a fixed
-list of fields, flattens three of them out of the `chain` and `timestamps`
-objects (`outside`, `branches`, `restarts`, `anchorsOk`, `anchorAuthorities`,
-`keyDatedBy`), and normalises an absent `holding` to `null`. Diff your report's
-corresponding fields against it, not your whole report.
+list of fields, flattens some of them out of the `chain` and `timestamps`
+objects (`outside`, `branches`, `restarts`, `unattributed`, `setAside`,
+`anchorsOk`, `anchorAuthorities`, `keyDatedBy`), and normalises an absent
+`holding` to `null`. Diff your report's corresponding fields against it, not
+your whole report.
 
 ### The manifest status
 
@@ -767,11 +868,12 @@ signature covered, which is a fact about the FILE and not about the checker: an
 older file marks fewer. `holding` is the four fields EXPECTED.json
 compares, `{kind, included, totalSource, leftOut}`, where `kind` is `report`
 when the envelope carries a `selection` and `whole-record` otherwise. The
-reference checker's own `holding` object carries seven more beside them, taken
+reference checker's own `holding` object carries eight more beside them, taken
 from the envelope and the manifest for the opening summary it prints:
 `records`, `generatedAt`, `fwVersion`, `fingerprint`, `anchors`,
-`keyStamped` and `manifestOk`. Those seven are convenience and not contract; a
-checker MAY leave every one of them out. `anchorsOk` and `anchorAuthorities`
+`keyStamped`, `manifestOk` and `unreadable`, the count of section 1's
+`unreadableArchivedRows` when the checker took it and 0 otherwise. Those eight
+are convenience and not contract; a checker MAY leave every one of them out. `anchorsOk` and `anchorAuthorities`
 are independent:
 a token can be sound under an authority the checker does not pin, and a report
 that blends the two tells a reader a sound token is broken. `keyDatedBy` is the

@@ -143,7 +143,7 @@ function parseExport(text) {
 function createVerifier(document) {
   // ---- CORE (verbatim from src/forensics/verifier-core-source.ts) ----
 
-  var PAYLOAD_KEYS=["id","timestamp","platform","originalText","originalHash","originalLength","neutralizedText","author","postUrl","techniques","overallScore","userAgeCategory","aiSource","feedSource","aiModel","aiProvider","detectionMode","configSnapshot","prevRecordHash","chainPosition","verdict","skipReason","kind","parentVideoId","environment","priorChainHash","resetReason","publicKeyFingerprint","topic","sourceCategory","parentRecordId","commentDepth","roomAuthor","roomCaption","roomUrl","harmFloor","failureKind","cap","metrics","anchorUrl","overrideOrigin","visualApplied","videoContext","accountType","sourceContainer","observedSequence","viewportSeenAt","surfaceSessionId","imageContext","surfaceOrigin","textCapture","mediaUrls","decision","reader","buildId","verdictOrigin","authorCapture"];
+  var PAYLOAD_KEYS=["id","timestamp","platform","originalText","originalHash","originalLength","neutralizedText","author","postUrl","techniques","overallScore","userAgeCategory","aiSource","feedSource","aiModel","aiProvider","detectionMode","configSnapshot","prevRecordHash","chainPosition","verdict","skipReason","kind","parentVideoId","environment","priorChainHash","resetReason","publicKeyFingerprint","topic","sourceCategory","parentRecordId","commentDepth","roomAuthor","roomCaption","roomUrl","harmFloor","failureKind","cap","metrics","anchorUrl","overrideOrigin","visualApplied","videoContext","accountType","sourceContainer","observedSequence","viewportSeenAt","surfaceSessionId","imageContext","surfaceOrigin","textCapture","mediaUrls","decision","reader","buildId","verdictOrigin","authorCapture","authorName"];
   var OUTSIDE_PAYLOAD_KEYS=["integrityHash","signature","chainAnchor","redacted"];
   function hex(buf){return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');}
   async function sha256(s){return hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));}
@@ -189,7 +189,8 @@ function createVerifier(document) {
       reader:r.reader,
       buildId:r.buildId,
       verdictOrigin:r.verdictOrigin,
-      authorCapture:r.authorCapture
+      authorCapture:r.authorCapture,
+      authorName:r.authorName
     });
   }
   async function importPubKey(jwk){
@@ -362,7 +363,11 @@ function createVerifier(document) {
     // confirmed by signature and is counted as unattributed. A seam is never
     // a failure on its own: a modified record fails its own hash, a forged
     // one fails its signature, and those are reported per record.
-    var hashes={};
+    //
+    // Every table in this walk is keyed by text taken from the records, so none of them inherits
+    // from Object: a record naming "constructor" is a missing hash, not a crash before the edited
+    // record is reported.
+    var hashes=Object.create(null);
     for(var h=0;h<records.length;h++){
       if(typeof records[h].integrityHash==='string') hashes[records[h].integrityHash]=true;
     }
@@ -382,31 +387,95 @@ function createVerifier(document) {
     // resolve, nothing changes: the run before it is not shown to be the one it
     // follows, and a reused position is still counted.
     //
-    // Two conditions keep the rule from being wider than its reason (found the
-    // same day by reading the first draft against FORMAT.md). The record named must be the LAST
-    // of a run, which in a file means no record names it as its predecessor: a
-    // marker pointing into the middle of a month links nothing. And the marker
-    // itself must have verified under a key, because a marker whose signature
-    // was not checked could otherwise erase branch counts by being present.
+    // The marker itself must have verified under a key, because a marker whose
+    // signature was not checked could otherwise erase branch counts by being
+    // present.
+    //
+    // The record named may already have a successor. A restore does this: the
+    // records written after the backup stay in the archive, and the next reset
+    // names the record the restore went back to. Those records are counted as
+    // set aside, once each, rather than as every position the two runs share,
+    // so a marker naming a record in the middle of a run still leaves one of
+    // the two lines from it counted and the file cannot read verified.
     var GENESIS='feelingwise-chain-genesis-v1';
-    var namedAsPrev={};
-    for(var np=0;np<records.length;np++){
-      if(typeof records[np].prevRecordHash==='string') namedAsPrev[records[np].prevRecordHash]=true;
+    function isRunMarker(r){
+      return (r.kind==='month-rotation-marker'||r.kind==='reset-marker')&&r.chainPosition===0;
     }
     function opensLinkedRun(r,idx){
       var own=perRecord&&perRecord[idx];
-      return (r.kind==='month-rotation-marker'||r.kind==='reset-marker')
-        && r.chainPosition===0
+      return isRunMarker(r)
         && typeof r.priorChainHash==='string'&&r.priorChainHash!==''
         && hashes[r.priorChainHash]===true
-        && namedAsPrev[r.priorChainHash]!==true
         && !!(own&&own.ok&&!own.unverified);
     }
-    var seenPos={},branches=0,restarts=0,unattributed=0,outside=0,run=0;
+    // A record's parent is the record it follows: for a linked marker the one its priorChainHash
+    // names, for any other record its predecessor. So a reset goes on from a record as a successor does.
+    var byHash=Object.create(null),successors=Object.create(null);
+    var linked=[],isLinked={},markersNaming=Object.create(null);
+    for(var np=0;np<records.length;np++){
+      var rn=records[np];
+      if(typeof rn.integrityHash==='string'&&byHash[rn.integrityHash]===undefined) byHash[rn.integrityHash]=np;
+      if(np>0&&opensLinkedRun(rn,np)){
+        linked.push(np); isLinked[np]=true;
+        (markersNaming[rn.priorChainHash]||(markersNaming[rn.priorChainHash]=[])).push(np);
+      }else if(typeof rn.prevRecordHash==='string'){
+        (successors[rn.prevRecordHash]||(successors[rn.prevRecordHash]=[])).push(np);
+      }
+    }
+    function childrenOf(h){ return (successors[h]||[]).concat(markersNaming[h]||[]); }
+    // The line the record kept is the one its newest record is on. A whole-record file puts the
+    // live chain after the archive and before the records of earlier keys, so that record is the
+    // last one with a position that is not from an earlier key. Its parents are followed back, so
+    // that where a restore went back to a later backup the line it returned to is the one kept,
+    // however long recording then goes on.
+    var keptChild={};
+    var tip=records.length-1;
+    while(tip>=0&&(typeof records[tip].chainPosition!=='number'||records[tip].chainPosition<0||records[tip].chainAnchor==='pre-rekey')) tip--;
+    for(var up=tip,onKept={};up>=0&&!onKept[up];){
+      onKept[up]=true;
+      var ur=records[up],uh=isLinked[up]?ur.priorChainHash:ur.prevRecordHash;
+      var pu=typeof uh==='string'?byHash[uh]:undefined;
+      if(pu===undefined||onKept[pu]) break;
+      keptChild[pu]=up; up=pu;
+    }
+    // At a record a linked marker names, one child carries the kept line on and every other child
+    // starts a line set aside. Where the newest record does not lead back to the named record, the
+    // last marker in the file naming it keeps its run, as the last reset after a restore does.
+    var counted={},forkDone={};
+    function countSetAside(markerIdx){
+      var named=records[markerIdx].priorChainHash,fork=byHash[named];
+      if(forkDone[fork]) return 0;
+      forkDone[fork]=true;
+      var naming=markersNaming[named];
+      var kept=keptChild[fork]!==undefined?keptChild[fork]:naming[naming.length-1];
+      var queue=childrenOf(named),n=0;
+      for(var q=0;q<queue.length;q++){
+        var k=queue[q];
+        if(k===kept||counted[k]) continue;
+        counted[k]=true; n++;
+        var kh=records[k].integrityHash;
+        if(typeof kh!=='string') continue;
+        var more=childrenOf(kh);
+        for(var mq=0;mq<more.length;mq++) queue.push(more[mq]);
+      }
+      return n;
+    }
+    // Every line is counted before any position is compared, so that a record set aside is left
+    // out of the comparison wherever the file puts it, before its marker or after.
+    var setAside=0,setAsideLines=[];
+    for(var li=0;li<linked.length;li++){
+      var aside=countSetAside(linked[li]);
+      if(aside>0){
+        var namedPos=records[byHash[records[linked[li]].priorChainHash]].chainPosition;
+        setAside+=aside;
+        setAsideLines.push({position:typeof namedPos==='number'?namedPos:-1,n:aside});
+      }
+    }
+    var seenPos=Object.create(null),branches=0,restarts=0,unattributed=0,outside=0,run=0;
     for(var i=0;i<records.length;i++){
       var cur=records[i];
-      if(i>0&&opensLinkedRun(cur,i)) run++;
-      if(typeof cur.chainPosition==='number'){
+      if(isLinked[i]) run++;
+      if(typeof cur.chainPosition==='number'&&!counted[i]){
         var posKey=(cur.publicKeyFingerprint||'')+':'+run+':'+cur.chainPosition;
         if(seenPos[posKey]) branches++; else seenPos[posKey]=true;
       }
@@ -422,9 +491,13 @@ function createVerifier(document) {
         if(cur.prevRecordHash!==''&&cur.prevRecordHash!==GENESIS&&cur.chainPosition!==0&&!hashes[cur.prevRecordHash]) outside++;
         continue;
       }
-      // The opener of a linked run names no predecessor: the genesis constant
-      // is not a record, so it is not one that is missing from the file.
-      if(cur.prevRecordHash===GENESIS&&opensLinkedRun(cur,i)) continue;
+      // The genesis constant is not a record, so a marker's own predecessor is
+      // never missing. What it follows is priorChainHash, and that is the record
+      // counted when it is not in the file.
+      if(cur.prevRecordHash===GENESIS&&isRunMarker(cur)){
+        if(typeof cur.priorChainHash==='string'&&cur.priorChainHash!==''&&!hashes[cur.priorChainHash]) outside++;
+        continue;
+      }
       if(hashes[cur.prevRecordHash]) continue;
       var prev=records[i-1];
       var contiguous=typeof prev.chainPosition==='number'
@@ -436,7 +509,7 @@ function createVerifier(document) {
       if(!signedBoth) unattributed++;
       restarts++;
     }
-    return {ok:true,branches:branches,restarts:restarts,unattributed:unattributed,outside:outside};
+    return {ok:true,branches:branches,restarts:restarts,unattributed:unattributed,outside:outside,setAside:setAside,setAsideLines:setAsideLines};
   }
   // Completeness, recomputed by the recipient rather than read off the
   // page-one summary. The summary is static HTML written at export time; if
@@ -580,6 +653,9 @@ function createVerifier(document) {
     if(perRecord.some(function(r){return r.unverified;})) return 'partial';
     if(perRecord.some(function(r){return r.carriedKey;})) return 'partial';
     if(chain.branches>0||chain.restarts>0) return 'partial';
+    // Nothing signed says whether a restore or a rewrite with the same key made
+    // a line the record did not keep, and a report's selection does not explain it.
+    if(chain.setAside>0) return 'partial';
     if(chain.outside>0){
       var sel=extra&&extra.selection;
       if(!sel||chain.outside>sel.leftOut) return 'partial';
@@ -603,14 +679,30 @@ function createVerifier(document) {
     }
     return 'verified';
   }
-  function chainNotes(chain,i18n,sel){
+  // The envelope's count of archived records the install could not read is under no digest, so it
+  // is taken only when the manifest verified and the signed unreadableRows row begins with the same
+  // number. It names why predecessors are missing and never makes a file read better than partial.
+  function unreadableOf(data,manifestState){
+    var n=data&&data.unreadableArchivedRows;
+    if(manifestState!=='ok'||typeof n!=='number'||!(n>0)||n%1!==0) return 0;
+    var row=provRow(readProvenanceRows(),'unreadableRows');
+    var lead=row===null?null:/^[0-9]+/.exec(row);
+    return lead&&Number(lead[0])===n?n:0;
+  }
+  function chainNotes(chain,i18n,sel,unreadable){
     var notes=[];
+    var lines=chain.setAsideLines||[];
+    for(var sl=0;sl<lines.length;sl++){
+      notes.push(i18n.chainNoteSetAside.replace('{n}',String(lines[sl].n)).replace('{position}',lines[sl].position>=0?String(lines[sl].position):'?'));
+    }
     var seams=(chain.branches||0)+(chain.restarts||0);
     if(seams>0) notes.push(i18n.chainNoteSeams.replace('{n}',String(seams)));
     if(chain.unattributed>0) notes.push(i18n.chainNoteUnattributed.replace('{n}',String(chain.unattributed)));
     if(chain.outside>0){
       if(sel&&chain.outside<=sel.leftOut&&i18n.chainNoteOutsideStated){
         notes.push(i18n.chainNoteOutsideStated.replace('{n}',String(chain.outside)).replace('{x}',String(sel.included)).replace('{y}',String(sel.totalSource)));
+      }else if(unreadable>0&&chain.outside<=unreadable&&i18n.chainNoteOutsideUnreadable){
+        notes.push(i18n.chainNoteOutsideUnreadable.replace('{n}',String(chain.outside)).replace('{u}',String(unreadable)));
       }else{
         notes.push(i18n.chainNoteOutside.replace('{n}',String(chain.outside)));
       }
@@ -736,7 +828,7 @@ function createVerifier(document) {
     return 'ok';
   }
   // ---- END CORE ----
-  return { importVerifiedPubKey, redactionIndex, verifyOne, verifyChain, anchorFindings, coverageFromRecords, verificationState, checkManifest, provenanceRowNames, sha256, selectionOf };
+  return { importVerifiedPubKey, redactionIndex, verifyOne, verifyChain, anchorFindings, coverageFromRecords, verificationState, checkManifest, provenanceRowNames, sha256, selectionOf, unreadableOf };
 }
 
 // ---- RFC 3161 (compiled from src/forensics/rfc3161.ts by scripts/gen-rfc3161-inline.mjs; defines __FW_RFC3161__) ----
@@ -1576,6 +1668,9 @@ async function verifyExportText(text) {
   // many records it holds of how many the install had; the whole record
   // states nothing and holds everything the install still had.
   const sel = v.selectionOf(data, records);
+  // Archived records the install says under its signature it could not read (unreadableOf in the
+  // core). They are why a whole record can be less than everything the install held.
+  const unreadable = v.unreadableOf(data, report.manifest);
   const keyStamped = !!(data.keyGenesis && Array.isArray(data.keyGenesis.anchors) && data.keyGenesis.anchors.length);
   report.holding = {
     kind: sel ? 'report' : (html ? 'whole-record' : 'envelope'),
@@ -1600,6 +1695,7 @@ async function verifyExportText(text) {
     // and its selection field verified — removing or reordering a record in one
     // breaks recordsDigest exactly as it does in the HTML.
     manifestOk: false,
+    unreadable,
   };
   report.holding.manifestOk = report.manifest === 'ok' || report.manifest === 'no-rows';
   let state = v.verificationState(perRecord, report.chain, { anchors: report.anchors, coverage: report.coverage, selection: sel });
@@ -1612,14 +1708,19 @@ async function verifyExportText(text) {
   // stands behind. The count alone would answer a question nobody asked.
   pushNote(report, 'noteCoveredRows', { n: (report.coveredRows || []).length, rows: (report.coveredRows || []).join(', ') },
     report.manifest === 'ok' && (report.coveredRows || []).length > 0);
+  for (const line of report.chain.setAsideLines || []) {
+    pushNote(report, 'noteSetAside', { n: line.n, position: line.position >= 0 ? line.position : '?' }, true);
+  }
   const seams = (report.chain.branches || 0) + (report.chain.restarts || 0);
   pushNote(report, 'noteSeams', { n: seams }, seams > 0);
   pushNote(report, 'noteUnattributed', { n: report.chain.unattributed }, report.chain.unattributed > 0);
   if (report.chain.outside > 0) {
     const leftOutOnPurpose = !!sel && report.chain.outside <= sel.leftOut;
+    const notRead = !leftOutOnPurpose && unreadable > 0 && report.chain.outside <= unreadable;
     pushNote(report, 'noteOutsideSelection',
       { n: report.chain.outside, included: sel ? sel.included : 0, total: sel ? sel.totalSource : 0 }, leftOutOnPurpose);
-    pushNote(report, 'noteOutside', { n: report.chain.outside }, !leftOutOnPurpose);
+    pushNote(report, 'noteOutsideUnreadable', { n: report.chain.outside, u: unreadable }, notRead);
+    pushNote(report, 'noteOutside', { n: report.chain.outside }, !leftOutOnPurpose && !notRead);
   }
   // Content withheld. The reader is told plainly, because the headline verdict
   // says "every hash recomputed" and for these records it was not: their
@@ -1666,7 +1767,7 @@ async function verifyExportText(text) {
  * A locale this table does not carry falls back to English rather than printing
  * a half-translated report, which reads as broken rather than as honest.
  */
-const WORDS = {"en":{"holdingMade":", made {when}","holdingBy":" by {version}","holdingKey":", key {fingerprint}","holdingStamps":", {n} independent time stamp(s)","holdingStampsAndKey":" and a stamp over the key","holdingNoStamps":", no independent time stamp","holdingUnchecked":" — the file's own claim, not checked here: with no signed manifest, records removed from the end or put out of order would not show","holdingReport":"You are holding a report: {included} of the {total} records the install had, {leftOut} left out by its own gate","holdingWhole":"You are holding the whole record: {n} record(s), everything the install still had","holdingWholeClaimed":"The file says it is the whole record: {n} record(s)","holdingEnvelope":"You are holding a bare envelope of {n} record(s)","verifiedReport":"VERIFIED as a report of {included} of {total} records: every hash recomputed and every signature checked under the {keys} key(s) this file carries; the signed manifest matches.","verified":"VERIFIED: {n} record(s), every hash recomputed and every signature checked under the {keys} key(s) this file carries; the signed manifest matches.","partial":"PARTIALLY VERIFIED: {n} record(s), no hash failed{andNoSignature}.","partialAndNoSignature":" and no signature failed","partialPriorKey":"{n} record(s) verify by hash only: their signing key is not in this file.","partialUnsigned":"{n} record(s) carry no signature.","partialUncheckable":"{n} record(s) could not have their signature checked.","partialRejected":"{n} record(s) were checked and their signature did not verify; they name no key, so this may be a key that has since rotated rather than an edit, and it is not proof of either.","partialCarriedKey":"{n} record(s) verify under a key that travelled in this file; the file cannot say whose key it is.","brokenAtRecord":"BROKEN at record {position} ({id}): {reason}.","brokenBefore":"BROKEN before any record was checked: {reason}{detail}.","brokenDetail":" ({detail})","broken":"BROKEN.","failedInAll":"{n} record(s) failed in all.","unknownFields":"{n} of them also carry fields this checker does not know ({names}).","checkerOlder":"A checker older than the file fails exactly this way. Check the version of this checker before reading the result as an edit.","noteNoManifest":"no signed manifest: the file was made by a build before 2026-09-06, or the install could not sign it","noteBareEnvelope":"this is a bare JSON envelope: everything in the manifest was checked except the digest over the page rows, which are not present in this form. Ask for the HTML export to check those too.","noteCoveredRows":"the signature covers {n} statements this page makes about the file and its records: {rows}. Anything else on the page is outside it.","noteSeams":"{n} chain seam(s): the install signed records at positions it had already used, or restarted","noteUnattributed":"{n} seam(s) could not be attributed by signature","noteOutsideSelection":"{n} record(s) link to records this report left out on purpose; it holds {included} of the {total} the install had, chosen by its own gate, and says so under its signature. Ask for the whole record if you need everything.","noteOutside":"{n} record(s) name a predecessor that is not in this file","noteRedactedHead":"{n} record(s) had fields withheld before this file was made: their content is not here, so their hash was not recomputed. Each one is named by a signed redaction marker in this file","noteRedactedAllChecked":" and its signature over that hash was checked.","noteRedactedNoneChecked":", and none of their signatures were checked: {why}, so the marker is all there is.","noteRedactedSomeChecked":". {checked} of them had their signature over that hash checked; of the rest, {why}, so for those the marker is all there is.","whyUnsignedOne":"{n} carries no signature at all","whyUnsignedMany":"{n} carry no signature at all","whyPriorKeyOne":"{n} names a signing key this file does not carry","whyPriorKeyMany":"{n} name a signing key this file does not carry","whyNoKey":"{n} could not be checked, because this file has no key of its own to check them under","noteNoTimeStamp":"no independent time stamp in this file: no chain anchor from a public authority and no stamp over the signing key; nothing here shows when these records existed beyond what the install wrote","noteStampedNotInFile":"{n} independently timestamped record(s) are not in this file","noteStampBeyond":"an independent timestamp names position {position}, past the last record here","stamps":"Time-stamp tokens over the chain: {opened} opened; {known} verified under a recognised authority{authorities}; {unknown} under an authority this checker does not recognise; {failed} failed.","stampsAuthorities":" ({list})","stampUnknown":"position {position}: signed by {signer}, root {root}; anyone can run a timestamping service, so this token dates nothing on its own.","stampUnnamed":"an unnamed certificate","stampFailed":"position {position}: failed {why}.","stampFailedUnknown":"unknown","keyExisted":"The signing key existed no later than {when} ({authorities}), by a token over the key as it is in this file.","keyNotDated":"The stamp over the signing key did not verify under a recognised authority; the key is not dated by this file.","labelHolding":"What you are holding","labelVerdict":"What its own cryptography says","labelRaw":"The full report as data","limit":"This checks the file against itself. It does not establish who made the file, whether the key is the original key, or that the file is complete."},"ro":{"holdingMade":", făcut {when}","holdingBy":" de {version}","holdingKey":", cheie {fingerprint}","holdingStamps":", {n} marcă(mărci) de timp independentă(e)","holdingStampsAndKey":" și o marcă peste cheie","holdingNoStamps":", nicio marcă de timp independentă","holdingUnchecked":", ceea ce este afirmația fișierului, neverificată aici: fără un manifest semnat, înregistrările scoase de la sfârșit sau puse în altă ordine nu s-ar vedea","holdingReport":"Ai în mână un raport: {included} din cele {total} înregistrări pe care le avea instalarea, {leftOut} lăsate deoparte de propriul ei filtru","holdingWhole":"Ai în mână înregistrarea întreagă: {n} înregistrare(i), tot ce mai avea instalarea","holdingWholeClaimed":"Fișierul spune că este înregistrarea întreagă: {n} înregistrare(i)","holdingEnvelope":"Ai în mână un plic simplu cu {n} înregistrare(i)","verifiedReport":"VERIFICAT ca raport al {included} din {total} înregistrări: fiecare hash a fost recalculat și fiecare semnătură verificată cu cele {keys} chei pe care le poartă acest fișier; manifestul semnat corespunde.","verified":"VERIFICAT: {n} înregistrare(i), fiecare hash a fost recalculat și fiecare semnătură verificată cu cele {keys} chei pe care le poartă acest fișier; manifestul semnat corespunde.","partial":"VERIFICAT PARȚIAL: {n} înregistrare(i), niciun hash nu a eșuat{andNoSignature}.","partialAndNoSignature":" și nicio semnătură nu a eșuat","partialPriorKey":"{n} înregistrare(i) se verifică doar prin hash: cheia lor de semnare nu se află în acest fișier.","partialUnsigned":"{n} înregistrare(i) nu poartă semnătură.","partialUncheckable":"{n} înregistrare(i) nu au putut avea semnătura verificată.","partialRejected":"{n} înregistrare(i) au fost verificate și semnătura lor nu a trecut; ele nu numesc nicio cheie, deci poate fi o cheie rotită între timp, nu o modificare, și nu este dovada niciuneia.","partialCarriedKey":"{n} înregistrare(i) se verifică sub o cheie care a călătorit în acest fișier; fișierul nu poate spune a cui este cheia.","brokenAtRecord":"EȘUAT la înregistrarea {position} ({id}): {reason}.","brokenBefore":"EȘUAT înainte să fie verificată vreo înregistrare: {reason}{detail}.","brokenDetail":" ({detail})","broken":"EȘUAT.","failedInAll":"{n} înregistrare(i) au eșuat în total.","unknownFields":"{n} dintre ele poartă și câmpuri pe care acest verificator nu le cunoaște ({names}).","checkerOlder":"Un verificator mai vechi decât fișierul eșuează exact în acest fel. Verifică versiunea acestui verificator înainte să citești rezultatul ca pe o modificare.","noteNoManifest":"niciun manifest semnat: fișierul a fost făcut de o versiune dinainte de 2026-09-06, sau instalarea nu l-a putut semna","noteBareEnvelope":"acesta este un plic JSON simplu: totul din manifest a fost verificat în afară de amprenta peste rândurile paginii, care nu sunt prezente în această formă. Cere exportul HTML ca să le verifici și pe acelea.","noteCoveredRows":"semnătura acoperă {n} afirmații pe care această pagină le face despre fișier și despre înregistrările lui: {rows}. Orice altceva de pe pagină este în afara ei.","noteSeams":"{n} cusătură(i) în lanț: instalarea a semnat înregistrări pe poziții pe care le folosise deja, sau a luat-o de la capăt","noteUnattributed":"{n} cusătură(i) nu au putut fi atribuite prin semnătură","noteOutsideSelection":"{n} înregistrare(i) se leagă de înregistrări pe care acest raport le-a lăsat deoparte intenționat; el conține {included} din cele {total} pe care le avea instalarea, alese de propriul lui filtru, și spune asta sub semnătura lui. Cere înregistrarea întreagă dacă ai nevoie de tot.","noteOutside":"{n} înregistrare(i) numesc o predecesoare care nu se află în acest fișier","noteRedactedHead":"{n} înregistrare(i) au avut câmpuri reținute înainte ca acest fișier să fie făcut: conținutul lor nu este aici, deci hash-ul lor nu a fost recalculat. Fiecare este numită de o marcă de redactare semnată din acest fișier","noteRedactedAllChecked":" iar semnătura ei peste acel hash a fost verificată.","noteRedactedNoneChecked":", și niciuna dintre semnăturile lor nu a fost verificată: {why}, deci marca este tot ce există.","noteRedactedSomeChecked":". {checked} dintre ele au avut semnătura peste acel hash verificată; dintre restul, {why}, deci pentru acelea marca este tot ce există.","whyUnsignedOne":"{n} nu poartă nicio semnătură","whyUnsignedMany":"{n} nu poartă nicio semnătură","whyPriorKeyOne":"{n} numește o cheie de semnare pe care acest fișier nu o poartă","whyPriorKeyMany":"{n} numesc o cheie de semnare pe care acest fișier nu o poartă","whyNoKey":"{n} nu au putut fi verificate, pentru că acest fișier nu are o cheie proprie cu care să le verifice","noteNoTimeStamp":"nicio marcă de timp independentă în acest fișier: nicio ancoră de lanț de la o autoritate publică și nicio marcă peste cheia de semnare; nimic de aici nu arată când au existat aceste înregistrări dincolo de ce a scris instalarea","noteStampedNotInFile":"{n} înregistrare(i) marcate independent în timp nu se află în acest fișier","noteStampBeyond":"o marcă de timp independentă numește poziția {position}, dincolo de ultima înregistrare de aici","stamps":"Mărci de timp peste lanț: {opened} deschise; {known} verificate sub o autoritate recunoscută{authorities}; {unknown} sub o autoritate pe care acest verificator nu o recunoaște; {failed} eșuate.","stampsAuthorities":" ({list})","stampUnknown":"poziția {position}: semnată de {signer}, rădăcină {root}; oricine poate rula un serviciu de marcare a timpului, deci această marcă nu datează nimic de una singură.","stampUnnamed":"un certificat fără nume","stampFailed":"poziția {position}: a eșuat {why}.","stampFailedUnknown":"necunoscut","keyExisted":"Cheia de semnare exista cel târziu la {when} ({authorities}), pe baza unei mărci peste cheie așa cum se află ea în acest fișier.","keyNotDated":"Marca peste cheia de semnare nu s-a verificat sub o autoritate recunoscută; cheia nu este datată de acest fișier.","labelHolding":"Ce ai în mână","labelVerdict":"Ce spune propria ei criptografie","labelRaw":"Raportul complet, ca date","limit":"Aceasta verifică fișierul față de el însuși. Nu stabilește cine a făcut fișierul, dacă cheia este cheia originală, sau că fișierul este complet."}};
+const WORDS = {"en":{"holdingMade":", made {when}","holdingBy":" by {version}","holdingKey":", key {fingerprint}","holdingStamps":", {n} independent time stamp(s)","holdingStampsAndKey":" and a stamp over the key","holdingNoStamps":", no independent time stamp","holdingUnchecked":" — the file's own claim, not checked here: with no signed manifest, records removed from the end or put out of order would not show","holdingReport":"You are holding a report: {included} of the {total} records the install had, {leftOut} left out by its own gate","holdingWhole":"You are holding the whole record: {n} record(s), everything the install still had","holdingWholeUnreadable":"You are holding the whole record: {n} record(s), all the install still had apart from {u} archived record(s) it could not read","holdingWholeClaimed":"The file says it is the whole record: {n} record(s)","holdingEnvelope":"You are holding a bare envelope of {n} record(s)","verifiedReport":"VERIFIED as a report of {included} of {total} records: every hash recomputed and every signature checked under the {keys} key(s) this file carries; the signed manifest matches.","verified":"VERIFIED: {n} record(s), every hash recomputed and every signature checked under the {keys} key(s) this file carries; the signed manifest matches.","partial":"PARTIALLY VERIFIED: {n} record(s), no hash failed{andNoSignature}.","partialAndNoSignature":" and no signature failed","partialPriorKey":"{n} record(s) verify by hash only: their signing key is not in this file.","partialUnsigned":"{n} record(s) carry no signature.","partialUncheckable":"{n} record(s) could not have their signature checked.","partialRejected":"{n} record(s) were checked and their signature did not verify; they name no key, so this may be a key that has since rotated rather than an edit, and it is not proof of either.","partialCarriedKey":"{n} record(s) verify under a key that travelled in this file; the file cannot say whose key it is.","brokenAtRecord":"BROKEN at record {position} ({id}): {reason}.","brokenBefore":"BROKEN before any record was checked: {reason}{detail}.","brokenDetail":" ({detail})","broken":"BROKEN.","failedInAll":"{n} record(s) failed in all.","unknownFields":"{n} of them also carry fields this checker does not know ({names}).","checkerOlder":"A checker older than the file fails exactly this way. Check the version of this checker before reading the result as an edit.","noteNoManifest":"no signed manifest: the file was made by a build before 2026-09-06, or the install could not sign it","noteBareEnvelope":"this is a bare JSON envelope: everything in the manifest was checked except the digest over the page rows, which are not present in this form. Ask for the HTML export to check those too.","noteCoveredRows":"the signature covers {n} statements this page makes about the file and its records: {rows}. Anything else on the page is outside it.","noteSetAside":"{n} record(s) continue from position {position} on a line the record did not keep; a restore from a backup does this, and so does replacing records and signing the replacements with the same key, and this file cannot say which","noteSeams":"{n} chain seam(s): the install signed records at positions it had already used, or restarted","noteUnattributed":"{n} seam(s) could not be attributed by signature","noteOutsideSelection":"{n} record(s) link to records this report left out on purpose; it holds {included} of the {total} the install had, chosen by its own gate, and says so under its signature. Ask for the whole record if you need everything.","noteOutsideUnreadable":"{n} record(s) name a predecessor that is not in this file; the install that made it says under its signature that it could not read {u} of its archived record(s), so they are not in it, and that accounts for the missing predecessors","noteOutside":"{n} record(s) name a predecessor that is not in this file","noteRedactedHead":"{n} record(s) had fields withheld before this file was made: their content is not here, so their hash was not recomputed. Each one is named by a signed redaction marker in this file","noteRedactedAllChecked":" and its signature over that hash was checked.","noteRedactedNoneChecked":", and none of their signatures were checked: {why}, so the marker is all there is.","noteRedactedSomeChecked":". {checked} of them had their signature over that hash checked; of the rest, {why}, so for those the marker is all there is.","whyUnsignedOne":"{n} carries no signature at all","whyUnsignedMany":"{n} carry no signature at all","whyPriorKeyOne":"{n} names a signing key this file does not carry","whyPriorKeyMany":"{n} name a signing key this file does not carry","whyNoKey":"{n} could not be checked, because this file has no key of its own to check them under","noteNoTimeStamp":"no independent time stamp in this file: no chain anchor from a public authority and no stamp over the signing key; nothing here shows when these records existed beyond what the install wrote","noteStampedNotInFile":"{n} independently timestamped record(s) are not in this file","noteStampBeyond":"an independent timestamp names position {position}, past the last record here","stamps":"Time-stamp tokens over the chain: {opened} opened; {known} verified under a recognised authority{authorities}; {unknown} under an authority this checker does not recognise; {failed} failed.","stampsAuthorities":" ({list})","stampUnknown":"position {position}: signed by {signer}, root {root}; anyone can run a timestamping service, so this token dates nothing on its own.","stampUnnamed":"an unnamed certificate","stampFailed":"position {position}: failed {why}.","stampFailedUnknown":"unknown","keyExisted":"The signing key existed no later than {when} ({authorities}), by a token over the key as it is in this file.","keyNotDated":"The stamp over the signing key did not verify under a recognised authority; the key is not dated by this file.","labelHolding":"What you are holding","labelVerdict":"What its own cryptography says","labelRaw":"The full report as data","limit":"This checks the file against itself. It does not establish who made the file, whether the key is the original key, or that the file is complete."},"ro":{"holdingMade":", făcut {when}","holdingBy":" de {version}","holdingKey":", cheie {fingerprint}","holdingStamps":", {n} marcă(mărci) de timp independentă(e)","holdingStampsAndKey":" și o marcă peste cheie","holdingNoStamps":", nicio marcă de timp independentă","holdingUnchecked":", ceea ce este afirmația fișierului, neverificată aici: fără un manifest semnat, înregistrările scoase de la sfârșit sau puse în altă ordine nu s-ar vedea","holdingReport":"Ai în mână un raport: {included} din cele {total} înregistrări pe care le avea instalarea, {leftOut} lăsate deoparte de propriul ei filtru","holdingWhole":"Ai în mână înregistrarea întreagă: {n} înregistrare(i), tot ce mai avea instalarea","holdingWholeUnreadable":"Ai în mână înregistrarea întreagă: {n} înregistrare(i), tot ce mai avea instalarea în afară de {u} înregistrare(i) arhivată(e) pe care nu le-a putut citi","holdingWholeClaimed":"Fișierul spune că este înregistrarea întreagă: {n} înregistrare(i)","holdingEnvelope":"Ai în mână un plic simplu cu {n} înregistrare(i)","verifiedReport":"VERIFICAT ca raport al {included} din {total} înregistrări: fiecare hash a fost recalculat și fiecare semnătură verificată cu cele {keys} chei pe care le poartă acest fișier; manifestul semnat corespunde.","verified":"VERIFICAT: {n} înregistrare(i), fiecare hash a fost recalculat și fiecare semnătură verificată cu cele {keys} chei pe care le poartă acest fișier; manifestul semnat corespunde.","partial":"VERIFICAT PARȚIAL: {n} înregistrare(i), niciun hash nu a eșuat{andNoSignature}.","partialAndNoSignature":" și nicio semnătură nu a eșuat","partialPriorKey":"{n} înregistrare(i) se verifică doar prin hash: cheia lor de semnare nu se află în acest fișier.","partialUnsigned":"{n} înregistrare(i) nu poartă semnătură.","partialUncheckable":"{n} înregistrare(i) nu au putut avea semnătura verificată.","partialRejected":"{n} înregistrare(i) au fost verificate și semnătura lor nu a trecut; ele nu numesc nicio cheie, deci poate fi o cheie rotită între timp, nu o modificare, și nu este dovada niciuneia.","partialCarriedKey":"{n} înregistrare(i) se verifică sub o cheie care a călătorit în acest fișier; fișierul nu poate spune a cui este cheia.","brokenAtRecord":"EȘUAT la înregistrarea {position} ({id}): {reason}.","brokenBefore":"EȘUAT înainte să fie verificată vreo înregistrare: {reason}{detail}.","brokenDetail":" ({detail})","broken":"EȘUAT.","failedInAll":"{n} înregistrare(i) au eșuat în total.","unknownFields":"{n} dintre ele poartă și câmpuri pe care acest verificator nu le cunoaște ({names}).","checkerOlder":"Un verificator mai vechi decât fișierul eșuează exact în acest fel. Verifică versiunea acestui verificator înainte să citești rezultatul ca pe o modificare.","noteNoManifest":"niciun manifest semnat: fișierul a fost făcut de o versiune dinainte de 2026-09-06, sau instalarea nu l-a putut semna","noteBareEnvelope":"acesta este un plic JSON simplu: totul din manifest a fost verificat în afară de amprenta peste rândurile paginii, care nu sunt prezente în această formă. Cere exportul HTML ca să le verifici și pe acelea.","noteCoveredRows":"semnătura acoperă {n} afirmații pe care această pagină le face despre fișier și despre înregistrările lui: {rows}. Orice altceva de pe pagină este în afara ei.","noteSetAside":"{n} înregistrare(i) continuă de la poziția {position} pe o linie pe care registrul nu a păstrat-o; o restaurare dintr-o copie de rezervă face asta, la fel și înlocuirea unor înregistrări urmată de semnarea înlocuitorilor cu aceeași cheie, iar acest fișier nu poate spune care dintre ele","noteSeams":"{n} cusătură(i) în lanț: instalarea a semnat înregistrări pe poziții pe care le folosise deja, sau a luat-o de la capăt","noteUnattributed":"{n} cusătură(i) nu au putut fi atribuite prin semnătură","noteOutsideSelection":"{n} înregistrare(i) se leagă de înregistrări pe care acest raport le-a lăsat deoparte intenționat; el conține {included} din cele {total} pe care le avea instalarea, alese de propriul lui filtru, și spune asta sub semnătura lui. Cere înregistrarea întreagă dacă ai nevoie de tot.","noteOutsideUnreadable":"{n} înregistrare(i) numesc o predecesoare care nu se află în acest fișier; instalarea care l-a făcut spune sub semnătura ei că nu a putut citi {u} dintre înregistrările ei arhivate, așa că ele nu sunt în el, iar asta explică predecesoarele care lipsesc","noteOutside":"{n} înregistrare(i) numesc o predecesoare care nu se află în acest fișier","noteRedactedHead":"{n} înregistrare(i) au avut câmpuri reținute înainte ca acest fișier să fie făcut: conținutul lor nu este aici, deci hash-ul lor nu a fost recalculat. Fiecare este numită de o marcă de redactare semnată din acest fișier","noteRedactedAllChecked":" iar semnătura ei peste acel hash a fost verificată.","noteRedactedNoneChecked":", și niciuna dintre semnăturile lor nu a fost verificată: {why}, deci marca este tot ce există.","noteRedactedSomeChecked":". {checked} dintre ele au avut semnătura peste acel hash verificată; dintre restul, {why}, deci pentru acelea marca este tot ce există.","whyUnsignedOne":"{n} nu poartă nicio semnătură","whyUnsignedMany":"{n} nu poartă nicio semnătură","whyPriorKeyOne":"{n} numește o cheie de semnare pe care acest fișier nu o poartă","whyPriorKeyMany":"{n} numesc o cheie de semnare pe care acest fișier nu o poartă","whyNoKey":"{n} nu au putut fi verificate, pentru că acest fișier nu are o cheie proprie cu care să le verifice","noteNoTimeStamp":"nicio marcă de timp independentă în acest fișier: nicio ancoră de lanț de la o autoritate publică și nicio marcă peste cheia de semnare; nimic de aici nu arată când au existat aceste înregistrări dincolo de ce a scris instalarea","noteStampedNotInFile":"{n} înregistrare(i) marcate independent în timp nu se află în acest fișier","noteStampBeyond":"o marcă de timp independentă numește poziția {position}, dincolo de ultima înregistrare de aici","stamps":"Mărci de timp peste lanț: {opened} deschise; {known} verificate sub o autoritate recunoscută{authorities}; {unknown} sub o autoritate pe care acest verificator nu o recunoaște; {failed} eșuate.","stampsAuthorities":" ({list})","stampUnknown":"poziția {position}: semnată de {signer}, rădăcină {root}; oricine poate rula un serviciu de marcare a timpului, deci această marcă nu datează nimic de una singură.","stampUnnamed":"un certificat fără nume","stampFailed":"poziția {position}: a eșuat {why}.","stampFailedUnknown":"necunoscut","keyExisted":"Cheia de semnare exista cel târziu la {when} ({authorities}), pe baza unei mărci peste cheie așa cum se află ea în acest fișier.","keyNotDated":"Marca peste cheia de semnare nu s-a verificat sub o autoritate recunoscută; cheia nu este datată de acest fișier.","labelHolding":"Ce ai în mână","labelVerdict":"Ce spune propria ei criptografie","labelRaw":"Raportul complet, ca date","limit":"Aceasta verifică fișierul față de el însuși. Nu stabilește cine a făcut fișierul, dacă cheia este cheia originală, sau că fișierul este complet."}};
 const DEFAULT_LOCALE = 'en';
 
 function wordsFor(lang) {
@@ -1783,6 +1884,9 @@ function describeHolding(h, w) {
       + when + by + key + stamps + (h.manifestOk ? '' : unchecked) + '.';
   }
   if (h.kind === 'whole-record') {
+    if (h.manifestOk && h.unreadable > 0) {
+      return fmt(w.holdingWholeUnreadable, { n: h.records, u: h.unreadable }) + when + by + key + stamps + '.';
+    }
     return h.manifestOk
       ? fmt(w.holdingWhole, { n: h.records }) + when + by + key + stamps + '.'
       : fmt(w.holdingWholeClaimed, { n: h.records }) + when + by + key + stamps + unchecked + '.';
